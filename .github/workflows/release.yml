@@ -37,7 +37,7 @@ jobs:
           ./hack/build.sh
 
       - name: Create Release
-        uses: ncipollo/release-action@v2.5.0
+        uses: ncipollo/release-action@v1.12.0
         with:
           name: ${{ matrix.tag }}-${{ matrix.mode }}-${{ matrix.go_os }}-${{ matrix.go_arch }}
           tag: ${{ matrix.tag }}-${{ matrix.mode }}-${{ matrix.go_os }}-${{ matrix.go_arch }}
