@@ -32,7 +32,6 @@ jobs:
           export MODE=$mode
           export GIT_TAG=${{ matrix.tag }}-${{ matrix.mode }}-${{ matrix.go_os }}-${{ matrix.go_arch }}
           export OUTPUT=bin/openshift-install-${GIT_TAG}
-          export SOURCE_GIT_COMMIT=${{ env.SOURCE_GIT_COMMIT:-$(git rev-parse --verify 'HEAD^{commit}')}}
 
           # build the binary
           ./hack/build.sh
