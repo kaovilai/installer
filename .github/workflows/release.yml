@@ -27,31 +27,15 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
 
-      - name: Install Terraform
-        run: |
-          cd hack/terraform
-          make all
-          cd -
-
-      - name: Copy Terraform to mirror
-        run: |
-          cd hack
-          sh copy_terraform_to_mirror.sh
-          cd -
-
       - name: Build
         run: |
-          export CGO_ENABLED=0
-          export DEFAULT_ARCH=$go_arch
-          export GOOS=$go_os
-          export GOARCH=$go_arch
           export MODE=$mode
-          export TAGS=$tag
-          export OUTPUT=bin/openshift-install-$MODE-$go_os-$go_arch
-          export GIT_COMMIT=${{ env.SOURCE_GIT_COMMIT:-$(git rev-parse --verify 'HEAD^{commit}')}}
+          export GIT_TAG=${{ matrix.tag }}-${{ matrix.mode }}-${{ matrix.go_os }}-${{ matrix.go_arch }}
+          export OUTPUT=bin/openshift-install-${GIT_TAG}
+          export SOURCE_GIT_COMMIT=${{ env.SOURCE_GIT_COMMIT:-$(git rev-parse --verify 'HEAD^{commit}')}}
 
           # build the binary
-          go build -o $OUTPUT ./cmd/openshift-install
+          ./hack/build.sh
 
       - name: Create Release
         uses: ncipollo/release-action@v2.5.0
