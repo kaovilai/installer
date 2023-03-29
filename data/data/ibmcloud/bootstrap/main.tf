@@ -2,6 +2,25 @@ locals {
   prefix              = var.cluster_id
   port_kubernetes_api = 6443
   port_machine_config = 22623
+
+  # If we need to setup SecurityGroupRules to SSH to bootstrap, for non-public clusters (no Floating IP)
+  # combine the Control Plane and Compute subnet CIDRs, to create rules for ingress on those CIDR's
+  all_subnet_cidrs = local.public_endpoints ? [] : concat(data.ibm_is_subnet.control_plane_subnets[*].ipv4_cidr_block, data.ibm_is_subnet.compute_subnets[*].ipv4_cidr_block)
+}
+
+############################################
+# Subnet lookup
+############################################
+data "ibm_is_subnet" "control_plane_subnets" {
+  count = local.public_endpoints ? 0 : length(var.control_plane_subnet_id_list)
+
+  identifier = var.control_plane_subnet_id_list[count.index]
+}
+
+data "ibm_is_subnet" "compute_subnets" {
+  count = local.public_endpoints ? 0 : length(var.compute_subnet_id_list)
+
+  identifier = var.compute_subnet_id_list[count.index]
 }
 
 ############################################
@@ -32,7 +51,7 @@ resource "ibm_is_instance" "bootstrap_node" {
   # terraform-provider-ignition, we should use it instead of this template.
   # https://github.com/community-terraform-providers/terraform-provider-ignition/issues/16
   user_data = templatefile("${path.module}/templates/bootstrap.ign", {
-    HOSTNAME    = ibm_cos_bucket.bootstrap_ignition.s3_endpoint_public
+    HOSTNAME    = ibm_cos_bucket.bootstrap_ignition.s3_endpoint_direct
     BUCKET_NAME = ibm_cos_bucket.bootstrap_ignition.bucket_name
     OBJECT_NAME = ibm_cos_bucket_object.bootstrap_ignition.key
     IAM_TOKEN   = data.ibm_iam_auth_token.iam_token.iam_access_token
@@ -65,9 +84,11 @@ resource "ibm_is_security_group" "bootstrap" {
 
 # SSH
 resource "ibm_is_security_group_rule" "bootstrap_ssh_inbound" {
+  count = local.public_endpoints ? 1 : length(local.all_subnet_cidrs)
+
   group     = ibm_is_security_group.bootstrap.id
   direction = "inbound"
-  remote    = local.public_endpoints ? "0.0.0.0/0" : var.control_plane_security_group_id_list[0]
+  remote    = local.public_endpoints ? "0.0.0.0/0" : local.all_subnet_cidrs[count.index]
   tcp {
     port_min = 22
     port_max = 22
