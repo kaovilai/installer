@@ -48,6 +48,6 @@ jobs:
           tag: ${{ matrix.tag }}-${{ matrix.mode }}-${{ matrix.go_os }}-${{ matrix.go_arch }}
           body: Release ${{ matrix.tag }} for ${{ matrix.mode }} mode on ${{ matrix.go_os }}-${{ matrix.go_arch }}
           prerelease: false
-          files: ${{ env.OUTPUT }}
+          artifacts: ${{ env.OUTPUT }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
