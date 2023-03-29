@@ -46,6 +46,7 @@ jobs:
       - name: Create Release
         uses: ncipollo/release-action@v1.12.0
         with:
+          allowUpdates: true
           name: master-${{ matrix.tag }}-${{ matrix.mode }}-${{ matrix.go_os }}-${{ matrix.go_arch }}
           tag: master-${{ matrix.tag }}-${{ matrix.mode }}-${{ matrix.go_os }}-${{ matrix.go_arch }}
           body: Release ${{ matrix.tag }} for ${{ matrix.mode }} mode on ${{ matrix.go_os }}-${{ matrix.go_arch }}
