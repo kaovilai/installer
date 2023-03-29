@@ -16,7 +16,8 @@ jobs:
         go_os: [linux, darwin]
         mode: [release, dev]
         tag: ['', 'libvirt']
-
+    env:
+      OUTPUT: bin/openshift-install-${{ matrix.tag }}-${{ matrix.mode }}-${{ matrix.go_os }}-${{ matrix.go_arch }}
     runs-on: ${{ matrix.go_os == 'darwin' && 'macos-latest' || 'ubuntu-latest' }}
 
     steps:
@@ -32,7 +33,7 @@ jobs:
         run: |
           export MODE=$mode
           export GIT_TAG=${{ matrix.tag }}-${{ matrix.mode }}-${{ matrix.go_os }}-${{ matrix.go_arch }}
-          export OUTPUT=bin/openshift-install-${GIT_TAG}
+          export OUTPUT=${{ env.OUTPUT }}
 
           # build the binary
           if [[ "${go_os}" == "darwin" ]]; then
