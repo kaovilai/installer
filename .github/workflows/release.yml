@@ -10,13 +10,14 @@ env:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
     strategy:
       matrix:
         go_arch: [amd64, arm64]
         go_os: [linux, darwin]
         mode: [release, dev]
         tag: ['', 'libvirt']
+
+    runs-on: ${{ matrix.go_os == 'darwin' && 'macos-latest' || 'ubuntu-latest' }}
 
     steps:
       - name: Checkout code
@@ -34,10 +35,14 @@ jobs:
           export OUTPUT=bin/openshift-install-${GIT_TAG}
 
           # build the binary
-          ./hack/build.sh
+          if [[ "${go_os}" == "darwin" ]]; then
+            env GOOS=darwin GOARCH=${go_arch} make clean all
+          else
+            ./hack/build.sh
+          fi
 
       - name: Create Release
-        uses: ncipollo/release-action@v1.12.0
+        uses: ncipollo/release-action@v2.5.0
         with:
           name: ${{ matrix.tag }}-${{ matrix.mode }}-${{ matrix.go_os }}-${{ matrix.go_arch }}
           tag: ${{ matrix.tag }}-${{ matrix.mode }}-${{ matrix.go_os }}-${{ matrix.go_arch }}
