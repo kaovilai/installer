@@ -653,8 +653,8 @@ github.com/aws/smithy-go/waiter
 # github.com/beevik/etree v1.1.0
 ## explicit
 github.com/beevik/etree
-# github.com/cloudflare/circl v1.2.0
-## explicit; go 1.16
+# github.com/cloudflare/circl v1.3.3
+## explicit; go 1.19
 github.com/cloudflare/circl/dh/x25519
 github.com/cloudflare/circl/dh/x448
 github.com/cloudflare/circl/ecc/goldilocks
@@ -1131,7 +1131,7 @@ github.com/zclconf/go-cty/cty/function/stdlib
 github.com/zclconf/go-cty/cty/gocty
 github.com/zclconf/go-cty/cty/json
 github.com/zclconf/go-cty/cty/set
-# golang.org/x/crypto v0.0.0-20221010152910-d6f0a8c073c2 => golang.org/x/crypto v0.0.0-20221010152910-d6f0a8c073c2
+# golang.org/x/crypto v0.3.1-0.20221117191849-2c476679df9a => golang.org/x/crypto v0.0.0-20221010152910-d6f0a8c073c2
 ## explicit; go 1.17
 golang.org/x/crypto/blowfish
 golang.org/x/crypto/cast5
