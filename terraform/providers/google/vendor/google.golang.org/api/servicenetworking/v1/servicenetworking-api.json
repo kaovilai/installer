@@ -685,6 +685,11 @@
                         "name"
                       ],
                       "parameters": {
+                        "includeUsedIpRanges": {
+                          "description": "Optional. When true, include the used IP ranges as part of the GetConsumerConfig output. This includes routes created inside the service networking network, consumer network, peers of the consumer network, and reserved ranges inside the service networking network. By default, this is false",
+                          "location": "query",
+                          "type": "boolean"
+                        },
                         "name": {
                           "description": "Required. Name of the consumer config to retrieve in the format: `services/{service}/projects/{project}/global/networks/{network}`. {service} is the peering service that is managing connectivity for the service producer's organization. For Google services that support this functionality, this value is `servicenetworking.googleapis.com`. {project} is a project number e.g. `12345` that contains the service consumer's VPC network. {network} is the name of the service consumer's VPC network.",
                           "location": "path",
@@ -860,7 +865,7 @@
       }
     }
   },
-  "revision": "20211013",
+  "revision": "20220904",
   "rootUrl": "https://servicenetworking.googleapis.com/",
   "schemas": {
     "AddDnsRecordSetMetadata": {
@@ -970,6 +975,15 @@
       "description": "Request to create a subnetwork in a previously peered service network.",
       "id": "AddSubnetworkRequest",
       "properties": {
+        "checkServiceNetworkingUsePermission": {
+          "description": "Optional. The IAM permission check determines whether the consumer project has 'servicenetworking.services.use' permission or not.",
+          "type": "boolean"
+        },
+        "computeIdempotencyWindow": {
+          "description": "Optional. Specifies a custom time bucket for Arcus subnetwork request idempotency. If two equivalent concurrent requests are made, Arcus will know to ignore the request if it has already been completed or is in progress. Only requests with matching compute_idempotency_window have guaranteed idempotency. Changing this time window between requests results in undefined behavior. Zero (or empty) value with custom_compute_idempotency_window=true specifies no idempotency (i.e. no request ID is provided to Arcus). Maximum value of 14 days (enforced by Arcus limit). For more information on how to use, see: go/revisit-sn-idempotency-window",
+          "format": "google-duration",
+          "type": "string"
+        },
         "consumer": {
           "description": "Required. A resource that represents the service consumer, such as `projects/123456`. The project number can be different from the value in the consumer network parameter. For example, the network might be part of a Shared VPC network. In those cases, Service Networking validates that this resource belongs to that Shared VPC.",
           "type": "string"
@@ -1026,11 +1040,15 @@
           "type": "string"
         },
         "subnetworkUsers": {
-          "description": "A list of members that are granted the `compute.networkUser` role on the subnet.",
+          "description": "A list of members that are granted the `roles/servicenetworking.subnetworkAdmin` role on the subnet.",
           "items": {
             "type": "string"
           },
           "type": "array"
+        },
+        "useCustomComputeIdempotencyWindow": {
+          "description": "Optional. Specifies if Service Networking should use a custom time bucket for Arcus idempotency. If false, Service Networking uses a 300 second (5 minute) Arcus idempotency window. If true, Service Networking uses a custom idempotency window provided by the user in field compute_idempotency_window. For more information on how to use, see: go/revisit-sn-idempotency-window",
+          "type": "boolean"
         }
       },
       "type": "object"
@@ -1112,7 +1130,7 @@
           "type": "string"
         },
         "jwtLocations": {
-          "description": "Defines the locations to extract the JWT. JWT locations can be either from HTTP headers or URL query parameters. The rule is that the first match wins. The checking order is: checking all headers first, then URL query parameters. If not specified, default to use following 3 locations: 1) Authorization: Bearer 2) x-goog-iap-jwt-assertion 3) access_token query parameter Default locations can be specified as followings: jwt_locations: - header: Authorization value_prefix: \"Bearer \" - header: x-goog-iap-jwt-assertion - query: access_token",
+          "description": "Defines the locations to extract the JWT. For now it is only used by the Cloud Endpoints to store the OpenAPI extension [x-google-jwt-locations] (https://cloud.google.com/endpoints/docs/openapi/openapi-extensions#x-google-jwt-locations) JWT locations can be one of HTTP headers, URL query parameters or cookies. The rule is that the first match wins. If not specified, default to use following 3 locations: 1) Authorization: Bearer 2) x-goog-iap-jwt-assertion 3) access_token query parameter Default locations can be specified as followings: jwt_locations: - header: Authorization value_prefix: \"Bearer \" - header: x-goog-iap-jwt-assertion - query: access_token",
           "items": {
             "$ref": "JwtLocation"
           },
@@ -1285,6 +1303,26 @@
       "properties": {},
       "type": "object"
     },
+    "CloudSQLConfig": {
+      "description": "Cloud SQL configuration.",
+      "id": "CloudSQLConfig",
+      "properties": {
+        "service": {
+          "description": "Peering service used for peering with the Cloud SQL project.",
+          "type": "string"
+        },
+        "umbrellaNetwork": {
+          "description": "The name of the umbrella network in the Cloud SQL umbrella project.",
+          "type": "string"
+        },
+        "umbrellaProject": {
+          "description": "The project number of the Cloud SQL umbrella project.",
+          "format": "int64",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
     "Connection": {
       "description": "Represents a private connection resource. A private connection is implemented as a VPC Network Peering connection between a service producer's VPC network and a service consumer's VPC network.",
       "id": "Connection",
@@ -1317,6 +1355,13 @@
       "description": "Configuration information for a private service access connection.",
       "id": "ConsumerConfig",
       "properties": {
+        "cloudsqlConfigs": {
+          "description": "Represents one or multiple Cloud SQL configurations.",
+          "items": {
+            "$ref": "CloudSQLConfig"
+          },
+          "type": "array"
+        },
         "consumerExportCustomRoutes": {
           "description": "Export custom routes flag value for peering from consumer to producer.",
           "type": "boolean"
@@ -1358,6 +1403,14 @@
           "description": "Output only. The reserved ranges associated with this private service access connection.",
           "items": {
             "$ref": "GoogleCloudServicenetworkingV1ConsumerConfigReservedRange"
+          },
+          "readOnly": true,
+          "type": "array"
+        },
+        "usedIpRanges": {
+          "description": "Output only. The IP ranges already in use by consumer or producer",
+          "items": {
+            "type": "string"
           },
           "readOnly": true,
           "type": "array"
@@ -1442,11 +1495,11 @@
       "type": "object"
     },
     "Control": {
-      "description": "Selects and configures the service controller used by the service. The service controller handles features like abuse, quota, billing, logging, monitoring, etc.",
+      "description": "Selects and configures the service controller used by the service. The service controller handles two things: - **What is allowed:** for each API request, Chemist checks the project status, activation status, abuse status, billing status, service status, location restrictions, VPC Service Controls, SuperQuota, and other policies. - **What has happened:** for each API response, Chemist reports the telemetry data to analytics, auditing, billing, eventing, logging, monitoring, sawmill, and tracing. Chemist also accepts telemetry data not associated with API traffic, such as billing metrics. Example: control: environment: servicecontrol.googleapis.com",
       "id": "Control",
       "properties": {
         "environment": {
-          "description": "The service control environment to use. If empty, no control plane feature (like quota and billing) will be enabled.",
+          "description": "The service controller environment to use. If empty, no control plane feature (like quota and billing) will be enabled. The recommended value for most services is servicecontrol.googleapis.com",
           "type": "string"
         }
       },
@@ -1636,7 +1689,7 @@
       "type": "object"
     },
     "Empty": {
-      "description": "A generic empty message that you can re-use to avoid defining duplicated empty messages in your APIs. A typical example is to use it as the request or the response type of an API method. For instance: service Foo { rpc Bar(google.protobuf.Empty) returns (google.protobuf.Empty); } The JSON representation for `Empty` is empty JSON object `{}`.",
+      "description": "A generic empty message that you can re-use to avoid defining duplicated empty messages in your APIs. A typical example is to use it as the request or the response type of an API method. For instance: service Foo { rpc Bar(google.protobuf.Empty) returns (google.protobuf.Empty); }",
       "id": "Empty",
       "properties": {},
       "type": "object"
@@ -1982,6 +2035,10 @@
       "description": "Specifies a location to extract JWT from an API request.",
       "id": "JwtLocation",
       "properties": {
+        "cookie": {
+          "description": "Specifies cookie name to extract JWT token.",
+          "type": "string"
+        },
         "header": {
           "description": "Specifies HTTP header name to extract JWT token.",
           "type": "string"
@@ -2219,10 +2276,10 @@
             "The feature is not yet implemented. Users can not use it.",
             "Prelaunch features are hidden from users and are only visible internally.",
             "Early Access features are limited to a closed group of testers. To use these features, you must sign up in advance and sign a Trusted Tester agreement (which includes confidentiality provisions). These features may be unstable, changed in backward-incompatible ways, and are not guaranteed to be released.",
-            "Alpha is a limited availability test for releases before they are cleared for widespread use. By Alpha, all significant design issues are resolved and we are in the process of verifying functionality. Alpha customers need to apply for access, agree to applicable terms, and have their projects allowlisted. Alpha releases don’t have to be feature complete, no SLAs are provided, and there are no technical support obligations, but they will be far enough along that customers can actually use them in test environments or for limited-use tests -- just like they would in normal production cases.",
+            "Alpha is a limited availability test for releases before they are cleared for widespread use. By Alpha, all significant design issues are resolved and we are in the process of verifying functionality. Alpha customers need to apply for access, agree to applicable terms, and have their projects allowlisted. Alpha releases don't have to be feature complete, no SLAs are provided, and there are no technical support obligations, but they will be far enough along that customers can actually use them in test environments or for limited-use tests -- just like they would in normal production cases.",
             "Beta is the point at which we are ready to open a release for any customer to use. There are no SLA or technical support obligations in a Beta release. Products will be complete from a feature perspective, but may have some open outstanding issues. Beta releases are suitable for limited production use cases.",
             "GA features are open to all developers and are considered stable and fully qualified for production use.",
-            "Deprecated features are scheduled to be shut down and removed. For more information, see the “Deprecation Policy” section of our [Terms of Service](https://cloud.google.com/terms/) and the [Google Cloud Platform Subject to the Deprecation Policy](https://cloud.google.com/terms/deprecation) documentation."
+            "Deprecated features are scheduled to be shut down and removed. For more information, see the \"Deprecation Policy\" section of our [Terms of Service](https://cloud.google.com/terms/) and the [Google Cloud Platform Subject to the Deprecation Policy](https://cloud.google.com/terms/deprecation) documentation."
           ],
           "type": "string"
         },
@@ -2316,10 +2373,10 @@
             "The feature is not yet implemented. Users can not use it.",
             "Prelaunch features are hidden from users and are only visible internally.",
             "Early Access features are limited to a closed group of testers. To use these features, you must sign up in advance and sign a Trusted Tester agreement (which includes confidentiality provisions). These features may be unstable, changed in backward-incompatible ways, and are not guaranteed to be released.",
-            "Alpha is a limited availability test for releases before they are cleared for widespread use. By Alpha, all significant design issues are resolved and we are in the process of verifying functionality. Alpha customers need to apply for access, agree to applicable terms, and have their projects allowlisted. Alpha releases don’t have to be feature complete, no SLAs are provided, and there are no technical support obligations, but they will be far enough along that customers can actually use them in test environments or for limited-use tests -- just like they would in normal production cases.",
+            "Alpha is a limited availability test for releases before they are cleared for widespread use. By Alpha, all significant design issues are resolved and we are in the process of verifying functionality. Alpha customers need to apply for access, agree to applicable terms, and have their projects allowlisted. Alpha releases don't have to be feature complete, no SLAs are provided, and there are no technical support obligations, but they will be far enough along that customers can actually use them in test environments or for limited-use tests -- just like they would in normal production cases.",
             "Beta is the point at which we are ready to open a release for any customer to use. There are no SLA or technical support obligations in a Beta release. Products will be complete from a feature perspective, but may have some open outstanding issues. Beta releases are suitable for limited production use cases.",
             "GA features are open to all developers and are considered stable and fully qualified for production use.",
-            "Deprecated features are scheduled to be shut down and removed. For more information, see the “Deprecation Policy” section of our [Terms of Service](https://cloud.google.com/terms/) and the [Google Cloud Platform Subject to the Deprecation Policy](https://cloud.google.com/terms/deprecation) documentation."
+            "Deprecated features are scheduled to be shut down and removed. For more information, see the \"Deprecation Policy\" section of our [Terms of Service](https://cloud.google.com/terms/) and the [Google Cloud Platform Subject to the Deprecation Policy](https://cloud.google.com/terms/deprecation) documentation."
           ],
           "type": "string"
         },
@@ -2401,10 +2458,10 @@
             "The feature is not yet implemented. Users can not use it.",
             "Prelaunch features are hidden from users and are only visible internally.",
             "Early Access features are limited to a closed group of testers. To use these features, you must sign up in advance and sign a Trusted Tester agreement (which includes confidentiality provisions). These features may be unstable, changed in backward-incompatible ways, and are not guaranteed to be released.",
-            "Alpha is a limited availability test for releases before they are cleared for widespread use. By Alpha, all significant design issues are resolved and we are in the process of verifying functionality. Alpha customers need to apply for access, agree to applicable terms, and have their projects allowlisted. Alpha releases don’t have to be feature complete, no SLAs are provided, and there are no technical support obligations, but they will be far enough along that customers can actually use them in test environments or for limited-use tests -- just like they would in normal production cases.",
+            "Alpha is a limited availability test for releases before they are cleared for widespread use. By Alpha, all significant design issues are resolved and we are in the process of verifying functionality. Alpha customers need to apply for access, agree to applicable terms, and have their projects allowlisted. Alpha releases don't have to be feature complete, no SLAs are provided, and there are no technical support obligations, but they will be far enough along that customers can actually use them in test environments or for limited-use tests -- just like they would in normal production cases.",
             "Beta is the point at which we are ready to open a release for any customer to use. There are no SLA or technical support obligations in a Beta release. Products will be complete from a feature perspective, but may have some open outstanding issues. Beta releases are suitable for limited production use cases.",
             "GA features are open to all developers and are considered stable and fully qualified for production use.",
-            "Deprecated features are scheduled to be shut down and removed. For more information, see the “Deprecation Policy” section of our [Terms of Service](https://cloud.google.com/terms/) and the [Google Cloud Platform Subject to the Deprecation Policy](https://cloud.google.com/terms/deprecation) documentation."
+            "Deprecated features are scheduled to be shut down and removed. For more information, see the \"Deprecation Policy\" section of our [Terms of Service](https://cloud.google.com/terms/) and the [Google Cloud Platform Subject to the Deprecation Policy](https://cloud.google.com/terms/deprecation) documentation."
           ],
           "type": "string"
         },
@@ -2588,18 +2645,18 @@
       "type": "object"
     },
     "Quota": {
-      "description": "Quota configuration helps to achieve fairness and budgeting in service usage. The metric based quota configuration works this way: - The service configuration defines a set of metrics. - For API calls, the quota.metric_rules maps methods to metrics with corresponding costs. - The quota.limits defines limits on the metrics, which will be used for quota checks at runtime. An example quota configuration in yaml format: quota: limits: - name: apiWriteQpsPerProject metric: library.googleapis.com/write_calls unit: \"1/min/{project}\" # rate limit for consumer projects values: STANDARD: 10000 # The metric rules bind all methods to the read_calls metric, # except for the UpdateBook and DeleteBook methods. These two methods # are mapped to the write_calls metric, with the UpdateBook method # consuming at twice rate as the DeleteBook method. metric_rules: - selector: \"*\" metric_costs: library.googleapis.com/read_calls: 1 - selector: google.example.library.v1.LibraryService.UpdateBook metric_costs: library.googleapis.com/write_calls: 2 - selector: google.example.library.v1.LibraryService.DeleteBook metric_costs: library.googleapis.com/write_calls: 1 Corresponding Metric definition: metrics: - name: library.googleapis.com/read_calls display_name: Read requests metric_kind: DELTA value_type: INT64 - name: library.googleapis.com/write_calls display_name: Write requests metric_kind: DELTA value_type: INT64 ",
+      "description": "Quota configuration helps to achieve fairness and budgeting in service usage. The metric based quota configuration works this way: - The service configuration defines a set of metrics. - For API calls, the quota.metric_rules maps methods to metrics with corresponding costs. - The quota.limits defines limits on the metrics, which will be used for quota checks at runtime. An example quota configuration in yaml format: quota: limits: - name: apiWriteQpsPerProject metric: library.googleapis.com/write_calls unit: \"1/min/{project}\" # rate limit for consumer projects values: STANDARD: 10000 (The metric rules bind all methods to the read_calls metric, except for the UpdateBook and DeleteBook methods. These two methods are mapped to the write_calls metric, with the UpdateBook method consuming at twice rate as the DeleteBook method.) metric_rules: - selector: \"*\" metric_costs: library.googleapis.com/read_calls: 1 - selector: google.example.library.v1.LibraryService.UpdateBook metric_costs: library.googleapis.com/write_calls: 2 - selector: google.example.library.v1.LibraryService.DeleteBook metric_costs: library.googleapis.com/write_calls: 1 Corresponding Metric definition: metrics: - name: library.googleapis.com/read_calls display_name: Read requests metric_kind: DELTA value_type: INT64 - name: library.googleapis.com/write_calls display_name: Write requests metric_kind: DELTA value_type: INT64 ",
       "id": "Quota",
       "properties": {
         "limits": {
-          "description": "List of `QuotaLimit` definitions for the service.",
+          "description": "List of QuotaLimit definitions for the service.",
           "items": {
             "$ref": "QuotaLimit"
           },
           "type": "array"
         },
         "metricRules": {
-          "description": "List of `MetricRule` definitions, each one mapping a selected method to one or more metrics.",
+          "description": "List of MetricRule definitions, each one mapping a selected method to one or more metrics.",
           "items": {
             "$ref": "MetricRule"
           },
@@ -3261,6 +3318,10 @@
     "ValidateConsumerConfigRequest": {
       "id": "ValidateConsumerConfigRequest",
       "properties": {
+        "checkServiceNetworkingUsePermission": {
+          "description": "Optional. The IAM permission check determines whether the consumer project has 'servicenetworking.services.use' permission or not.",
+          "type": "boolean"
+        },
         "consumerNetwork": {
           "description": "Required. The network that the consumer is using to connect with services. Must be in the form of projects/{project}/global/networks/{network} {project} is a project number, as in '12345' {network} is network name.",
           "type": "string"
@@ -3310,7 +3371,8 @@
             "RANGES_EXHAUSTED",
             "RANGES_NOT_RESERVED",
             "RANGES_DELETED_LATER",
-            "COMPUTE_API_NOT_ENABLED"
+            "COMPUTE_API_NOT_ENABLED",
+            "USE_PERMISSION_NOT_FOUND"
           ],
           "enumDescriptions": [
             "",
@@ -3326,7 +3388,8 @@
             "The reserved IP ranges do not have enough space to create a subnet of desired size.",
             "The IP ranges were not reserved.",
             "The IP ranges were reserved but deleted later.",
-            "The consumer project does not have the compute api enabled."
+            "The consumer project does not have the compute api enabled.",
+            "The consumer project does not have the permission from the host project."
           ],
           "type": "string"
         }

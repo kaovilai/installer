@@ -2,8 +2,14 @@
   "auth": {
     "oauth2": {
       "scopes": {
+        "https://www.googleapis.com/auth/cloud-identity.devices": {
+          "description": "Private Service: https://www.googleapis.com/auth/cloud-identity.devices"
+        },
         "https://www.googleapis.com/auth/cloud-identity.devices.lookup": {
           "description": "See your device details"
+        },
+        "https://www.googleapis.com/auth/cloud-identity.devices.readonly": {
+          "description": "Private Service: https://www.googleapis.com/auth/cloud-identity.devices.readonly"
         },
         "https://www.googleapis.com/auth/cloud-identity.groups": {
           "description": "See, change, create, and delete any of the Cloud Identity Groups that you can access, including the members of each group"
@@ -114,6 +120,151 @@
   },
   "protocol": "rest",
   "resources": {
+    "customers": {
+      "resources": {
+        "userinvitations": {
+          "methods": {
+            "cancel": {
+              "description": "Cancels a UserInvitation that was already sent.",
+              "flatPath": "v1/customers/{customersId}/userinvitations/{userinvitationsId}:cancel",
+              "httpMethod": "POST",
+              "id": "cloudidentity.customers.userinvitations.cancel",
+              "parameterOrder": [
+                "name"
+              ],
+              "parameters": {
+                "name": {
+                  "description": "Required. `UserInvitation` name in the format `customers/{customer}/userinvitations/{user_email_address}`",
+                  "location": "path",
+                  "pattern": "^customers/[^/]+/userinvitations/[^/]+$",
+                  "required": true,
+                  "type": "string"
+                }
+              },
+              "path": "v1/{+name}:cancel",
+              "request": {
+                "$ref": "CancelUserInvitationRequest"
+              },
+              "response": {
+                "$ref": "Operation"
+              }
+            },
+            "get": {
+              "description": "Retrieves a UserInvitation resource. **Note:** New consumer accounts with the customer's verified domain created within the previous 48 hours will not appear in the result. This delay also applies to newly-verified domains.",
+              "flatPath": "v1/customers/{customersId}/userinvitations/{userinvitationsId}",
+              "httpMethod": "GET",
+              "id": "cloudidentity.customers.userinvitations.get",
+              "parameterOrder": [
+                "name"
+              ],
+              "parameters": {
+                "name": {
+                  "description": "Required. `UserInvitation` name in the format `customers/{customer}/userinvitations/{user_email_address}`",
+                  "location": "path",
+                  "pattern": "^customers/[^/]+/userinvitations/[^/]+$",
+                  "required": true,
+                  "type": "string"
+                }
+              },
+              "path": "v1/{+name}",
+              "response": {
+                "$ref": "UserInvitation"
+              }
+            },
+            "isInvitableUser": {
+              "description": "Verifies whether a user account is eligible to receive a UserInvitation (is an unmanaged account). Eligibility is based on the following criteria: * the email address is a consumer account and it's the primary email address of the account, and * the domain of the email address matches an existing verified Google Workspace or Cloud Identity domain If both conditions are met, the user is eligible. **Note:** This method is not supported for Workspace Essentials customers.",
+              "flatPath": "v1/customers/{customersId}/userinvitations/{userinvitationsId}:isInvitableUser",
+              "httpMethod": "GET",
+              "id": "cloudidentity.customers.userinvitations.isInvitableUser",
+              "parameterOrder": [
+                "name"
+              ],
+              "parameters": {
+                "name": {
+                  "description": "Required. `UserInvitation` name in the format `customers/{customer}/userinvitations/{user_email_address}`",
+                  "location": "path",
+                  "pattern": "^customers/[^/]+/userinvitations/[^/]+$",
+                  "required": true,
+                  "type": "string"
+                }
+              },
+              "path": "v1/{+name}:isInvitableUser",
+              "response": {
+                "$ref": "IsInvitableUserResponse"
+              }
+            },
+            "list": {
+              "description": "Retrieves a list of UserInvitation resources. **Note:** New consumer accounts with the customer's verified domain created within the previous 48 hours will not appear in the result. This delay also applies to newly-verified domains.",
+              "flatPath": "v1/customers/{customersId}/userinvitations",
+              "httpMethod": "GET",
+              "id": "cloudidentity.customers.userinvitations.list",
+              "parameterOrder": [
+                "parent"
+              ],
+              "parameters": {
+                "filter": {
+                  "description": "Optional. A query string for filtering `UserInvitation` results by their current state, in the format: `\"state=='invited'\"`.",
+                  "location": "query",
+                  "type": "string"
+                },
+                "orderBy": {
+                  "description": "Optional. The sort order of the list results. You can sort the results in descending order based on either email or last update timestamp but not both, using `order_by=\"email desc\"`. Currently, sorting is supported for `update_time asc`, `update_time desc`, `email asc`, and `email desc`. If not specified, results will be returned based on `email asc` order.",
+                  "location": "query",
+                  "type": "string"
+                },
+                "pageSize": {
+                  "description": "Optional. The maximum number of UserInvitation resources to return. If unspecified, at most 100 resources will be returned. The maximum value is 200; values above 200 will be set to 200.",
+                  "format": "int32",
+                  "location": "query",
+                  "type": "integer"
+                },
+                "pageToken": {
+                  "description": "Optional. A page token, received from a previous `ListUserInvitations` call. Provide this to retrieve the subsequent page. When paginating, all other parameters provided to `ListBooks` must match the call that provided the page token.",
+                  "location": "query",
+                  "type": "string"
+                },
+                "parent": {
+                  "description": "Required. The customer ID of the Google Workspace or Cloud Identity account the UserInvitation resources are associated with.",
+                  "location": "path",
+                  "pattern": "^customers/[^/]+$",
+                  "required": true,
+                  "type": "string"
+                }
+              },
+              "path": "v1/{+parent}/userinvitations",
+              "response": {
+                "$ref": "ListUserInvitationsResponse"
+              }
+            },
+            "send": {
+              "description": "Sends a UserInvitation to email. If the `UserInvitation` does not exist for this request and it is a valid request, the request creates a `UserInvitation`. **Note:** The `get` and `list` methods have a 48-hour delay where newly-created consumer accounts will not appear in the results. You can still send a `UserInvitation` to those accounts if you know the unmanaged email address and IsInvitableUser==True.",
+              "flatPath": "v1/customers/{customersId}/userinvitations/{userinvitationsId}:send",
+              "httpMethod": "POST",
+              "id": "cloudidentity.customers.userinvitations.send",
+              "parameterOrder": [
+                "name"
+              ],
+              "parameters": {
+                "name": {
+                  "description": "Required. `UserInvitation` name in the format `customers/{customer}/userinvitations/{user_email_address}`",
+                  "location": "path",
+                  "pattern": "^customers/[^/]+/userinvitations/[^/]+$",
+                  "required": true,
+                  "type": "string"
+                }
+              },
+              "path": "v1/{+name}:send",
+              "request": {
+                "$ref": "SendUserInvitationRequest"
+              },
+              "response": {
+                "$ref": "Operation"
+              }
+            }
+          }
+        }
+      }
+    },
     "devices": {
       "methods": {
         "cancelWipe": {
@@ -139,7 +290,10 @@
           },
           "response": {
             "$ref": "Operation"
-          }
+          },
+          "scopes": [
+            "https://www.googleapis.com/auth/cloud-identity.devices"
+          ]
         },
         "create": {
           "description": "Creates a device. Only company-owned device may be created. **Note**: This method is available only to customers who have one of the following SKUs: Enterprise Standard, Enterprise Plus, Enterprise for Education, and Cloud Identity Premium",
@@ -160,7 +314,10 @@
           },
           "response": {
             "$ref": "Operation"
-          }
+          },
+          "scopes": [
+            "https://www.googleapis.com/auth/cloud-identity.devices"
+          ]
         },
         "delete": {
           "description": "Deletes the specified device.",
@@ -187,7 +344,10 @@
           "path": "v1/{+name}",
           "response": {
             "$ref": "Operation"
-          }
+          },
+          "scopes": [
+            "https://www.googleapis.com/auth/cloud-identity.devices"
+          ]
         },
         "get": {
           "description": "Retrieves the specified device.",
@@ -214,7 +374,11 @@
           "path": "v1/{+name}",
           "response": {
             "$ref": "GoogleAppsCloudidentityDevicesV1Device"
-          }
+          },
+          "scopes": [
+            "https://www.googleapis.com/auth/cloud-identity.devices",
+            "https://www.googleapis.com/auth/cloud-identity.devices.readonly"
+          ]
         },
         "list": {
           "description": "Lists/Searches devices.",
@@ -268,7 +432,11 @@
           "path": "v1/devices",
           "response": {
             "$ref": "GoogleAppsCloudidentityDevicesV1ListDevicesResponse"
-          }
+          },
+          "scopes": [
+            "https://www.googleapis.com/auth/cloud-identity.devices",
+            "https://www.googleapis.com/auth/cloud-identity.devices.readonly"
+          ]
         },
         "wipe": {
           "description": "Wipes all data on the specified device.",
@@ -293,7 +461,10 @@
           },
           "response": {
             "$ref": "Operation"
-          }
+          },
+          "scopes": [
+            "https://www.googleapis.com/auth/cloud-identity.devices"
+          ]
         }
       },
       "resources": {
@@ -322,7 +493,10 @@
               },
               "response": {
                 "$ref": "Operation"
-              }
+              },
+              "scopes": [
+                "https://www.googleapis.com/auth/cloud-identity.devices"
+              ]
             },
             "block": {
               "description": "Blocks device from accessing user data",
@@ -347,7 +521,10 @@
               },
               "response": {
                 "$ref": "Operation"
-              }
+              },
+              "scopes": [
+                "https://www.googleapis.com/auth/cloud-identity.devices"
+              ]
             },
             "cancelWipe": {
               "description": "Cancels an unfinished user account wipe. This operation can be used to cancel device wipe in the gap between the wipe operation returning success and the device being wiped.",
@@ -372,7 +549,10 @@
               },
               "response": {
                 "$ref": "Operation"
-              }
+              },
+              "scopes": [
+                "https://www.googleapis.com/auth/cloud-identity.devices"
+              ]
             },
             "delete": {
               "description": "Deletes the specified DeviceUser. This also revokes the user's access to device data.",
@@ -399,7 +579,10 @@
               "path": "v1/{+name}",
               "response": {
                 "$ref": "Operation"
-              }
+              },
+              "scopes": [
+                "https://www.googleapis.com/auth/cloud-identity.devices"
+              ]
             },
             "get": {
               "description": "Retrieves the specified DeviceUser",
@@ -426,7 +609,11 @@
               "path": "v1/{+name}",
               "response": {
                 "$ref": "GoogleAppsCloudidentityDevicesV1DeviceUser"
-              }
+              },
+              "scopes": [
+                "https://www.googleapis.com/auth/cloud-identity.devices",
+                "https://www.googleapis.com/auth/cloud-identity.devices.readonly"
+              ]
             },
             "list": {
               "description": "Lists/Searches DeviceUsers.",
@@ -474,7 +661,11 @@
               "path": "v1/{+parent}/deviceUsers",
               "response": {
                 "$ref": "GoogleAppsCloudidentityDevicesV1ListDeviceUsersResponse"
-              }
+              },
+              "scopes": [
+                "https://www.googleapis.com/auth/cloud-identity.devices",
+                "https://www.googleapis.com/auth/cloud-identity.devices.readonly"
+              ]
             },
             "lookup": {
               "description": "Looks up resource names of the DeviceUsers associated with the caller's credentials, as well as the properties provided in the request. This method must be called with end-user credentials with the scope: https://www.googleapis.com/auth/cloud-identity.devices.lookup If multiple properties are provided, only DeviceUsers having all of these properties are considered as matches - i.e. the query behaves like an AND. Different platforms require different amounts of information from the caller to ensure that the DeviceUser is uniquely identified. - iOS: No properties need to be passed, the caller's credentials are sufficient to identify the corresponding DeviceUser. - Android: Specifying the 'android_id' field is required. - Desktop: Specifying the 'raw_resource_id' field is required.",
@@ -550,7 +741,10 @@
               },
               "response": {
                 "$ref": "Operation"
-              }
+              },
+              "scopes": [
+                "https://www.googleapis.com/auth/cloud-identity.devices"
+              ]
             }
           },
           "resources": {
@@ -581,7 +775,11 @@
                   "path": "v1/{+name}",
                   "response": {
                     "$ref": "GoogleAppsCloudidentityDevicesV1ClientState"
-                  }
+                  },
+                  "scopes": [
+                    "https://www.googleapis.com/auth/cloud-identity.devices",
+                    "https://www.googleapis.com/auth/cloud-identity.devices.readonly"
+                  ]
                 },
                 "list": {
                   "description": "Lists the client states for the given search query.",
@@ -623,7 +821,11 @@
                   "path": "v1/{+parent}/clientStates",
                   "response": {
                     "$ref": "GoogleAppsCloudidentityDevicesV1ListClientStatesResponse"
-                  }
+                  },
+                  "scopes": [
+                    "https://www.googleapis.com/auth/cloud-identity.devices",
+                    "https://www.googleapis.com/auth/cloud-identity.devices.readonly"
+                  ]
                 },
                 "patch": {
                   "description": "Updates the client state for the device user **Note**: This method is available only to customers who have one of the following SKUs: Enterprise Standard, Enterprise Plus, Enterprise for Education, and Cloud Identity Premium",
@@ -659,7 +861,10 @@
                   },
                   "response": {
                     "$ref": "Operation"
-                  }
+                  },
+                  "scopes": [
+                    "https://www.googleapis.com/auth/cloud-identity.devices"
+                  ]
                 }
               }
             }
@@ -750,6 +955,39 @@
           "path": "v1/{+name}",
           "response": {
             "$ref": "Group"
+          },
+          "scopes": [
+            "https://www.googleapis.com/auth/cloud-identity.groups",
+            "https://www.googleapis.com/auth/cloud-identity.groups.readonly",
+            "https://www.googleapis.com/auth/cloud-platform"
+          ]
+        },
+        "getSecuritySettings": {
+          "description": "Get Security Settings",
+          "flatPath": "v1/groups/{groupsId}/securitySettings",
+          "httpMethod": "GET",
+          "id": "cloudidentity.groups.getSecuritySettings",
+          "parameterOrder": [
+            "name"
+          ],
+          "parameters": {
+            "name": {
+              "description": "Required. The security settings to retrieve. Format: `groups/{group_id}/securitySettings`",
+              "location": "path",
+              "pattern": "^groups/[^/]+/securitySettings$",
+              "required": true,
+              "type": "string"
+            },
+            "readMask": {
+              "description": "Field-level read mask of which fields to return. \"*\" returns all fields. If not specified, all fields will be returned. May only contain the following field: `member_restriction`.",
+              "format": "google-fieldmask",
+              "location": "query",
+              "type": "string"
+            }
+          },
+          "path": "v1/{+name}",
+          "response": {
+            "$ref": "SecuritySettings"
           },
           "scopes": [
             "https://www.googleapis.com/auth/cloud-identity.groups",
@@ -915,6 +1153,41 @@
           "scopes": [
             "https://www.googleapis.com/auth/cloud-identity.groups",
             "https://www.googleapis.com/auth/cloud-identity.groups.readonly",
+            "https://www.googleapis.com/auth/cloud-platform"
+          ]
+        },
+        "updateSecuritySettings": {
+          "description": "Update Security Settings",
+          "flatPath": "v1/groups/{groupsId}/securitySettings",
+          "httpMethod": "PATCH",
+          "id": "cloudidentity.groups.updateSecuritySettings",
+          "parameterOrder": [
+            "name"
+          ],
+          "parameters": {
+            "name": {
+              "description": "Output only. The resource name of the security settings. Shall be of the form `groups/{group_id}/securitySettings`.",
+              "location": "path",
+              "pattern": "^groups/[^/]+/securitySettings$",
+              "required": true,
+              "type": "string"
+            },
+            "updateMask": {
+              "description": "Required. The fully-qualified names of fields to update. May only contain the following field: `member_restriction.query`.",
+              "format": "google-fieldmask",
+              "location": "query",
+              "type": "string"
+            }
+          },
+          "path": "v1/{+name}",
+          "request": {
+            "$ref": "SecuritySettings"
+          },
+          "response": {
+            "$ref": "Operation"
+          },
+          "scopes": [
+            "https://www.googleapis.com/auth/cloud-identity.groups",
             "https://www.googleapis.com/auth/cloud-platform"
           ]
         }
@@ -1273,9 +1546,15 @@
       }
     }
   },
-  "revision": "20211116",
+  "revision": "20220831",
   "rootUrl": "https://cloudidentity.googleapis.com/",
   "schemas": {
+    "CancelUserInvitationRequest": {
+      "description": "Request to cancel sent invitation for target email in UserInvitation.",
+      "id": "CancelUserInvitationRequest",
+      "properties": {},
+      "type": "object"
+    },
     "CheckTransitiveMembershipResponse": {
       "description": "The response message for MembershipsService.CheckTransitiveMembership.",
       "id": "CheckTransitiveMembershipResponse",
@@ -1787,6 +2066,10 @@
           "readOnly": true,
           "type": "string"
         },
+        "deviceId": {
+          "description": "Unique identifier for the device.",
+          "type": "string"
+        },
         "deviceType": {
           "description": "Output only. Type of device.",
           "enum": [
@@ -2162,6 +2445,10 @@
         "customer": {
           "description": "Optional. [Resource name](https://cloud.google.com/apis/design/resource_names) of the customer. If you're using this API for your own organization, use `customers/my_customer` If you're using this API to manage another organization, use `customers/{customer}`, where customer is the customer to whom the device belongs.",
           "type": "string"
+        },
+        "removeResetLock": {
+          "description": "Optional. Specifies if a user is able to factory reset a device after a Device Wipe. On iOS, this is called \"Activation Lock\", while on Android, this is known as \"Factory Reset Protection\". If true, this protection will be removed from the device, so that a user can successfully factory reset. If false, the setting is untouched on the device.",
+          "type": "boolean"
         }
       },
       "type": "object"
@@ -2229,7 +2516,7 @@
         },
         "groupKey": {
           "$ref": "EntityKey",
-          "description": "Required. Immutable. The `EntityKey` of the `Group`."
+          "description": "Required. The `EntityKey` of the `Group`."
         },
         "labels": {
           "additionalProperties": {
@@ -2305,6 +2592,17 @@
       },
       "type": "object"
     },
+    "IsInvitableUserResponse": {
+      "description": "Response for IsInvitableUser RPC.",
+      "id": "IsInvitableUserResponse",
+      "properties": {
+        "isInvitableUser": {
+          "description": "Returns true if the email address is invitable.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
     "ListGroupsResponse": {
       "description": "Response message for ListGroups operation.",
       "id": "ListGroupsResponse",
@@ -2337,6 +2635,24 @@
         "nextPageToken": {
           "description": "A continuation token to retrieve the next page of results, or empty if there are no more results available.",
           "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "ListUserInvitationsResponse": {
+      "description": "Response message for UserInvitation listing request.",
+      "id": "ListUserInvitationsResponse",
+      "properties": {
+        "nextPageToken": {
+          "description": "The token for the next page. If not empty, indicates that there may be more `UserInvitation` resources that match the listing request; this value can be used in a subsequent ListUserInvitationsRequest to get continued results with the current list call.",
+          "type": "string"
+        },
+        "userInvitations": {
+          "description": "The list of UserInvitation resources.",
+          "items": {
+            "$ref": "UserInvitation"
+          },
+          "type": "array"
         }
       },
       "type": "object"
@@ -2400,6 +2716,21 @@
             "$ref": "TransitiveMembershipRole"
           },
           "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "MemberRestriction": {
+      "description": "The definition of MemberRestriction",
+      "id": "MemberRestriction",
+      "properties": {
+        "evaluation": {
+          "$ref": "RestrictionEvaluation",
+          "description": "The evaluated state of this restriction on a group."
+        },
+        "query": {
+          "description": "Member Restriction as defined by CEL expression. Supported restrictions are: `member.customer_id` and `member.type`. Valid values for `member.type` are `1`, `2` and `3`. They correspond to USER, SERVICE_ACCOUNT, and GROUP respectively. The value for `member.customer_id` only supports `groupCustomerId()` currently which means the customer id of the group will be used for restriction. Supported operators are `\u0026\u0026`, `||` and `==`, corresponding to AND, OR, and EQUAL. Examples: Allow only service accounts of given customer to be members. `member.type == 2 \u0026\u0026 member.customer_id == groupCustomerId()` Allow only users or groups to be members. `member.type == 1 || member.type == 3`",
+          "type": "string"
         }
       },
       "type": "object"
@@ -2489,6 +2820,36 @@
         "name": {
           "description": "The name of the `MembershipRole`. Must be one of `OWNER`, `MANAGER`, `MEMBER`.",
           "type": "string"
+        },
+        "restrictionEvaluations": {
+          "$ref": "RestrictionEvaluations",
+          "description": "Evaluations of restrictions applied to parent group on this membership."
+        }
+      },
+      "type": "object"
+    },
+    "MembershipRoleRestrictionEvaluation": {
+      "description": "The evaluated state of this restriction.",
+      "id": "MembershipRoleRestrictionEvaluation",
+      "properties": {
+        "state": {
+          "description": "Output only. The current state of the restriction",
+          "enum": [
+            "STATE_UNSPECIFIED",
+            "COMPLIANT",
+            "FORWARD_COMPLIANT",
+            "NON_COMPLIANT",
+            "EVALUATING"
+          ],
+          "enumDescriptions": [
+            "Default. Should not be used.",
+            "The member adheres to the parent group's restriction.",
+            "The group-group membership might be currently violating some parent group's restriction but in future, it will never allow any new member in the child group which can violate parent group's restriction.",
+            "The member violates the parent group's restriction.",
+            "The state of the membership is under evaluation."
+          ],
+          "readOnly": true,
+          "type": "string"
         }
       },
       "type": "object"
@@ -2567,6 +2928,43 @@
       },
       "type": "object"
     },
+    "RestrictionEvaluation": {
+      "description": "The evaluated state of this restriction.",
+      "id": "RestrictionEvaluation",
+      "properties": {
+        "state": {
+          "description": "Output only. The current state of the restriction",
+          "enum": [
+            "STATE_UNSPECIFIED",
+            "EVALUATING",
+            "COMPLIANT",
+            "FORWARD_COMPLIANT",
+            "NON_COMPLIANT"
+          ],
+          "enumDescriptions": [
+            "Default. Should not be used.",
+            "The restriction state is currently being evaluated.",
+            "All transitive memberships are adhering to restriction.",
+            "Some transitive memberships violate the restriction. No new violating memberships can be added.",
+            "Some transitive memberships violate the restriction. New violating direct memberships will be denied while indirect memberships may be added."
+          ],
+          "readOnly": true,
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "RestrictionEvaluations": {
+      "description": "Evaluations of restrictions applied to parent group on this membership.",
+      "id": "RestrictionEvaluations",
+      "properties": {
+        "memberRestrictionEvaluation": {
+          "$ref": "MembershipRoleRestrictionEvaluation",
+          "description": "Evaluation of the member restriction applied to this membership. Empty if the user lacks permission to view the restriction evaluation."
+        }
+      },
+      "type": "object"
+    },
     "SearchGroupsResponse": {
       "description": "The response message for GroupsService.SearchGroups.",
       "id": "SearchGroupsResponse",
@@ -2619,6 +3017,28 @@
           "type": "string"
         }
       },
+      "type": "object"
+    },
+    "SecuritySettings": {
+      "description": "The definition of security settings.",
+      "id": "SecuritySettings",
+      "properties": {
+        "memberRestriction": {
+          "$ref": "MemberRestriction",
+          "description": "The Member Restriction value"
+        },
+        "name": {
+          "description": "Output only. The resource name of the security settings. Shall be of the form `groups/{group_id}/securitySettings`.",
+          "readOnly": true,
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "SendUserInvitationRequest": {
+      "description": "A request to send email for inviting target user corresponding to the UserInvitation.",
+      "id": "SendUserInvitationRequest",
+      "properties": {},
       "type": "object"
     },
     "Status": {
