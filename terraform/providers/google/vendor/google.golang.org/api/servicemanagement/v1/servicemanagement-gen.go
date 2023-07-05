@@ -1,4 +1,4 @@
-// Copyright 2021 Google LLC.
+// Copyright 2022 Google LLC.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -8,35 +8,35 @@
 //
 // For product documentation, see: https://cloud.google.com/service-management/
 //
-// Creating a client
+// # Creating a client
 //
 // Usage example:
 //
-//   import "google.golang.org/api/servicemanagement/v1"
-//   ...
-//   ctx := context.Background()
-//   servicemanagementService, err := servicemanagement.NewService(ctx)
+//	import "google.golang.org/api/servicemanagement/v1"
+//	...
+//	ctx := context.Background()
+//	servicemanagementService, err := servicemanagement.NewService(ctx)
 //
 // In this example, Google Application Default Credentials are used for authentication.
 //
 // For information on how to create and obtain Application Default Credentials, see https://developers.google.com/identity/protocols/application-default-credentials.
 //
-// Other authentication options
+// # Other authentication options
 //
 // By default, all available scopes (see "Constants") are used to authenticate. To restrict scopes, use option.WithScopes:
 //
-//   servicemanagementService, err := servicemanagement.NewService(ctx, option.WithScopes(servicemanagement.ServiceManagementReadonlyScope))
+//	servicemanagementService, err := servicemanagement.NewService(ctx, option.WithScopes(servicemanagement.ServiceManagementReadonlyScope))
 //
 // To use an API key for authentication (note: some APIs do not support API keys), use option.WithAPIKey:
 //
-//   servicemanagementService, err := servicemanagement.NewService(ctx, option.WithAPIKey("AIza..."))
+//	servicemanagementService, err := servicemanagement.NewService(ctx, option.WithAPIKey("AIza..."))
 //
 // To use an OAuth token (e.g., a user token obtained via a three-legged OAuth flow), use option.WithTokenSource:
 //
-//   config := &oauth2.Config{...}
-//   // ...
-//   token, err := config.Exchange(ctx, ...)
-//   servicemanagementService, err := servicemanagement.NewService(ctx, option.WithTokenSource(config.TokenSource(ctx, token)))
+//	config := &oauth2.Config{...}
+//	// ...
+//	token, err := config.Exchange(ctx, ...)
+//	servicemanagementService, err := servicemanagement.NewService(ctx, option.WithTokenSource(config.TokenSource(ctx, token)))
 //
 // See https://godoc.org/google.golang.org/api/option/ for details on options.
 package servicemanagement // import "google.golang.org/api/servicemanagement/v1"
@@ -54,6 +54,7 @@ import (
 	"strings"
 
 	googleapi "google.golang.org/api/googleapi"
+	internal "google.golang.org/api/internal"
 	gensupport "google.golang.org/api/internal/gensupport"
 	option "google.golang.org/api/option"
 	internaloption "google.golang.org/api/option/internaloption"
@@ -100,7 +101,7 @@ const (
 
 // NewService creates a new APIService.
 func NewService(ctx context.Context, opts ...option.ClientOption) (*APIService, error) {
-	scopesOption := option.WithScopes(
+	scopesOption := internaloption.WithDefaultScopes(
 		"https://www.googleapis.com/auth/cloud-platform",
 		"https://www.googleapis.com/auth/cloud-platform.read-only",
 		"https://www.googleapis.com/auth/service.management",
@@ -330,8 +331,8 @@ func (s *Api) MarshalJSON() ([]byte, error) {
 // "DATA_READ" }, { "log_type": "DATA_WRITE", "exempted_members": [
 // "user:aliya@example.com" ] } ] } ] } For sampleservice, this policy
 // enables DATA_READ, DATA_WRITE and ADMIN_READ logging. It also exempts
-// jose@example.com from DATA_READ logging, and aliya@example.com from
-// DATA_WRITE logging.
+// `jose@example.com` from DATA_READ logging, and `aliya@example.com`
+// from DATA_WRITE logging.
 type AuditConfig struct {
 	// AuditLogConfigs: The configuration for logging of each type of
 	// permission.
@@ -456,11 +457,13 @@ type AuthProvider struct {
 	// https://www.googleapis.com/oauth2/v1/certs
 	JwksUri string `json:"jwksUri,omitempty"`
 
-	// JwtLocations: Defines the locations to extract the JWT. JWT locations
-	// can be either from HTTP headers or URL query parameters. The rule is
-	// that the first match wins. The checking order is: checking all
-	// headers first, then URL query parameters. If not specified, default
-	// to use following 3 locations: 1) Authorization: Bearer 2)
+	// JwtLocations: Defines the locations to extract the JWT. For now it is
+	// only used by the Cloud Endpoints to store the OpenAPI extension
+	// [x-google-jwt-locations]
+	// (https://cloud.google.com/endpoints/docs/openapi/openapi-extensions#x-google-jwt-locations)
+	// JWT locations can be one of HTTP headers, URL query parameters or
+	// cookies. The rule is that the first match wins. If not specified,
+	// default to use following 3 locations: 1) Authorization: Bearer 2)
 	// x-goog-iap-jwt-assertion 3) access_token query parameter Default
 	// locations can be specified as followings: jwt_locations: - header:
 	// Authorization value_prefix: "Bearer " - header:
@@ -867,24 +870,29 @@ type Binding struct {
 	// (https://cloud.google.com/iam/help/conditions/resource-policies).
 	Condition *Expr `json:"condition,omitempty"`
 
-	// Members: Specifies the principals requesting access for a Cloud
-	// Platform resource. `members` can have the following values: *
+	// Members: Specifies the principals requesting access for a Google
+	// Cloud resource. `members` can have the following values: *
 	// `allUsers`: A special identifier that represents anyone who is on the
 	// internet; with or without a Google account. *
 	// `allAuthenticatedUsers`: A special identifier that represents anyone
-	// who is authenticated with a Google account or a service account. *
-	// `user:{emailid}`: An email address that represents a specific Google
-	// account. For example, `alice@example.com` . *
-	// `serviceAccount:{emailid}`: An email address that represents a
-	// service account. For example,
-	// `my-other-app@appspot.gserviceaccount.com`. * `group:{emailid}`: An
-	// email address that represents a Google group. For example,
-	// `admins@example.com`. * `deleted:user:{emailid}?uid={uniqueid}`: An
-	// email address (plus unique identifier) representing a user that has
-	// been recently deleted. For example,
-	// `alice@example.com?uid=123456789012345678901`. If the user is
-	// recovered, this value reverts to `user:{emailid}` and the recovered
-	// user retains the role in the binding. *
+	// who is authenticated with a Google account or a service account. Does
+	// not include identities that come from external identity providers
+	// (IdPs) through identity federation. * `user:{emailid}`: An email
+	// address that represents a specific Google account. For example,
+	// `alice@example.com` . * `serviceAccount:{emailid}`: An email address
+	// that represents a Google service account. For example,
+	// `my-other-app@appspot.gserviceaccount.com`. *
+	// `serviceAccount:{projectid}.svc.id.goog[{namespace}/{kubernetes-sa}]`:
+	//  An identifier for a Kubernetes service account
+	// (https://cloud.google.com/kubernetes-engine/docs/how-to/kubernetes-service-accounts).
+	// For example, `my-project.svc.id.goog[my-namespace/my-kubernetes-sa]`.
+	// * `group:{emailid}`: An email address that represents a Google group.
+	// For example, `admins@example.com`. *
+	// `deleted:user:{emailid}?uid={uniqueid}`: An email address (plus
+	// unique identifier) representing a user that has been recently
+	// deleted. For example, `alice@example.com?uid=123456789012345678901`.
+	// If the user is recovered, this value reverts to `user:{emailid}` and
+	// the recovered user retains the role in the binding. *
 	// `deleted:serviceAccount:{emailid}?uid={uniqueid}`: An email address
 	// (plus unique identifier) representing a service account that has been
 	// recently deleted. For example,
@@ -1237,11 +1245,19 @@ func (s *ContextRule) MarshalJSON() ([]byte, error) {
 }
 
 // Control: Selects and configures the service controller used by the
-// service. The service controller handles features like abuse, quota,
-// billing, logging, monitoring, etc.
+// service. The service controller handles two things: - **What is
+// allowed:** for each API request, Chemist checks the project status,
+// activation status, abuse status, billing status, service status,
+// location restrictions, VPC Service Controls, SuperQuota, and other
+// policies. - **What has happened:** for each API response, Chemist
+// reports the telemetry data to analytics, auditing, billing, eventing,
+// logging, monitoring, sawmill, and tracing. Chemist also accepts
+// telemetry data not associated with API traffic, such as billing
+// metrics. Example: control: environment: servicecontrol.googleapis.com
 type Control struct {
-	// Environment: The service control environment to use. If empty, no
-	// control plane feature (like quota and billing) will be enabled.
+	// Environment: The service controller environment to use. If empty, no
+	// control plane feature (like quota and billing) will be enabled. The
+	// recommended value for most services is servicecontrol.googleapis.com
 	Environment string `json:"environment,omitempty"`
 
 	// ForceSendFields is a list of field names (e.g. "Environment") to
@@ -2287,6 +2303,9 @@ func (s *HttpRule) MarshalJSON() ([]byte, error) {
 
 // JwtLocation: Specifies a location to extract JWT from an API request.
 type JwtLocation struct {
+	// Cookie: Specifies cookie name to extract JWT token.
+	Cookie string `json:"cookie,omitempty"`
+
 	// Header: Specifies HTTP header name to extract JWT token.
 	Header string `json:"header,omitempty"`
 
@@ -2302,7 +2321,7 @@ type JwtLocation struct {
 	// value_prefix="Bearer " with a space at the end.
 	ValuePrefix string `json:"valuePrefix,omitempty"`
 
-	// ForceSendFields is a list of field names (e.g. "Header") to
+	// ForceSendFields is a list of field names (e.g. "Cookie") to
 	// unconditionally include in API requests. By default, fields with
 	// empty or default values are omitted from API requests. However, any
 	// non-pointer, non-interface field appearing in ForceSendFields will be
@@ -2310,7 +2329,7 @@ type JwtLocation struct {
 	// This may be used to include empty fields in Patch requests.
 	ForceSendFields []string `json:"-"`
 
-	// NullFields is a list of field names (e.g. "Header") to include in API
+	// NullFields is a list of field names (e.g. "Cookie") to include in API
 	// requests with the JSON null value. By default, fields with empty
 	// values are omitted from API requests. However, any field with an
 	// empty value appearing in NullFields will be sent to the server as
@@ -2652,7 +2671,8 @@ type ManagedService struct {
 	ProducerProjectId string `json:"producerProjectId,omitempty"`
 
 	// ServiceName: The name of the service. See the overview
-	// (/service-management/overview) for naming requirements.
+	// (https://cloud.google.com/service-infrastructure/docs/overview) for
+	// naming requirements.
 	ServiceName string `json:"serviceName,omitempty"`
 
 	// ServerResponse contains the HTTP response code and headers from the
@@ -2774,7 +2794,7 @@ type MetricDescriptor struct {
 	// issues are resolved and we are in the process of verifying
 	// functionality. Alpha customers need to apply for access, agree to
 	// applicable terms, and have their projects allowlisted. Alpha releases
-	// don’t have to be feature complete, no SLAs are provided, and there
+	// don't have to be feature complete, no SLAs are provided, and there
 	// are no technical support obligations, but they will be far enough
 	// along that customers can actually use them in test environments or
 	// for limited-use tests -- just like they would in normal production
@@ -2787,7 +2807,7 @@ type MetricDescriptor struct {
 	//   "GA" - GA features are open to all developers and are considered
 	// stable and fully qualified for production use.
 	//   "DEPRECATED" - Deprecated features are scheduled to be shut down
-	// and removed. For more information, see the “Deprecation Policy”
+	// and removed. For more information, see the "Deprecation Policy"
 	// section of our [Terms of Service](https://cloud.google.com/terms/)
 	// and the [Google Cloud Platform Subject to the Deprecation
 	// Policy](https://cloud.google.com/terms/deprecation) documentation.
@@ -2952,7 +2972,7 @@ type MetricDescriptorMetadata struct {
 	// issues are resolved and we are in the process of verifying
 	// functionality. Alpha customers need to apply for access, agree to
 	// applicable terms, and have their projects allowlisted. Alpha releases
-	// don’t have to be feature complete, no SLAs are provided, and there
+	// don't have to be feature complete, no SLAs are provided, and there
 	// are no technical support obligations, but they will be far enough
 	// along that customers can actually use them in test environments or
 	// for limited-use tests -- just like they would in normal production
@@ -2965,7 +2985,7 @@ type MetricDescriptorMetadata struct {
 	//   "GA" - GA features are open to all developers and are considered
 	// stable and fully qualified for production use.
 	//   "DEPRECATED" - Deprecated features are scheduled to be shut down
-	// and removed. For more information, see the “Deprecation Policy”
+	// and removed. For more information, see the "Deprecation Policy"
 	// section of our [Terms of Service](https://cloud.google.com/terms/)
 	// and the [Google Cloud Platform Subject to the Deprecation
 	// Policy](https://cloud.google.com/terms/deprecation) documentation.
@@ -3147,7 +3167,7 @@ type MonitoredResourceDescriptor struct {
 	// issues are resolved and we are in the process of verifying
 	// functionality. Alpha customers need to apply for access, agree to
 	// applicable terms, and have their projects allowlisted. Alpha releases
-	// don’t have to be feature complete, no SLAs are provided, and there
+	// don't have to be feature complete, no SLAs are provided, and there
 	// are no technical support obligations, but they will be far enough
 	// along that customers can actually use them in test environments or
 	// for limited-use tests -- just like they would in normal production
@@ -3160,7 +3180,7 @@ type MonitoredResourceDescriptor struct {
 	//   "GA" - GA features are open to all developers and are considered
 	// stable and fully qualified for production use.
 	//   "DEPRECATED" - Deprecated features are scheduled to be shut down
-	// and removed. For more information, see the “Deprecation Policy”
+	// and removed. For more information, see the "Deprecation Policy"
 	// section of our [Terms of Service](https://cloud.google.com/terms/)
 	// and the [Google Cloud Platform Subject to the Deprecation
 	// Policy](https://cloud.google.com/terms/deprecation) documentation.
@@ -3707,11 +3727,11 @@ func (s *Policy) MarshalJSON() ([]byte, error) {
 // be used for quota checks at runtime. An example quota configuration
 // in yaml format: quota: limits: - name: apiWriteQpsPerProject metric:
 // library.googleapis.com/write_calls unit: "1/min/{project}" # rate
-// limit for consumer projects values: STANDARD: 10000 # The metric
-// rules bind all methods to the read_calls metric, # except for the
-// UpdateBook and DeleteBook methods. These two methods # are mapped to
-// the write_calls metric, with the UpdateBook method # consuming at
-// twice rate as the DeleteBook method. metric_rules: - selector: "*"
+// limit for consumer projects values: STANDARD: 10000 (The metric rules
+// bind all methods to the read_calls metric, except for the UpdateBook
+// and DeleteBook methods. These two methods are mapped to the
+// write_calls metric, with the UpdateBook method consuming at twice
+// rate as the DeleteBook method.) metric_rules: - selector: "*"
 // metric_costs: library.googleapis.com/read_calls: 1 - selector:
 // google.example.library.v1.LibraryService.UpdateBook metric_costs:
 // library.googleapis.com/write_calls: 2 - selector:
@@ -3722,10 +3742,10 @@ func (s *Policy) MarshalJSON() ([]byte, error) {
 // name: library.googleapis.com/write_calls display_name: Write requests
 // metric_kind: DELTA value_type: INT64
 type Quota struct {
-	// Limits: List of `QuotaLimit` definitions for the service.
+	// Limits: List of QuotaLimit definitions for the service.
 	Limits []*QuotaLimit `json:"limits,omitempty"`
 
-	// MetricRules: List of `MetricRule` definitions, each one mapping a
+	// MetricRules: List of MetricRule definitions, each one mapping a
 	// selected method to one or more metrics.
 	MetricRules []*MetricRule `json:"metricRules,omitempty"`
 
@@ -3899,8 +3919,7 @@ type Rollout struct {
 	// CreateTime: Creation time of the rollout. Readonly.
 	CreateTime string `json:"createTime,omitempty"`
 
-	// CreatedBy: This field is deprecated and will be deleted. Please
-	// remove usage of this field.
+	// CreatedBy: The user who created the Rollout. Readonly.
 	CreatedBy string `json:"createdBy,omitempty"`
 
 	// DeleteServiceStrategy: The strategy associated with a rollout to
@@ -4129,7 +4148,7 @@ func (s *Service) MarshalJSON() ([]byte, error) {
 type SetIamPolicyRequest struct {
 	// Policy: REQUIRED: The complete policy to be applied to the
 	// `resource`. The size of the policy is limited to a few 10s of KB. An
-	// empty policy is a valid policy but certain Cloud Platform services
+	// empty policy is a valid policy but certain Google Cloud services
 	// (such as Projects) might reject them.
 	Policy *Policy `json:"policy,omitempty"`
 
@@ -4494,7 +4513,7 @@ func (s *SystemParameters) MarshalJSON() ([]byte, error) {
 // method.
 type TestIamPermissionsRequest struct {
 	// Permissions: The set of permissions to check for the `resource`.
-	// Permissions with wildcards (such as '*' or 'storage.*') are not
+	// Permissions with wildcards (such as `*` or `storage.*`) are not
 	// allowed. For more information see IAM Overview
 	// (https://cloud.google.com/iam/docs/overview#permissions).
 	Permissions []string `json:"permissions,omitempty"`
@@ -4838,7 +4857,7 @@ func (c *OperationsGetCall) Header() http.Header {
 
 func (c *OperationsGetCall) doRequest(alt string) (*http.Response, error) {
 	reqHeaders := make(http.Header)
-	reqHeaders.Set("x-goog-api-client", "gl-go/"+gensupport.GoVersion()+" gdcl/20211201")
+	reqHeaders.Set("x-goog-api-client", "gl-go/"+gensupport.GoVersion()+" gdcl/"+internal.Version)
 	for k, v := range c.header_ {
 		reqHeaders[k] = v
 	}
@@ -4876,17 +4895,17 @@ func (c *OperationsGetCall) Do(opts ...googleapi.CallOption) (*Operation, error)
 		if res.Body != nil {
 			res.Body.Close()
 		}
-		return nil, &googleapi.Error{
+		return nil, gensupport.WrapError(&googleapi.Error{
 			Code:   res.StatusCode,
 			Header: res.Header,
-		}
+		})
 	}
 	if err != nil {
 		return nil, err
 	}
 	defer googleapi.CloseBody(res)
 	if err := googleapi.CheckResponse(res); err != nil {
-		return nil, err
+		return nil, gensupport.WrapError(err)
 	}
 	ret := &Operation{
 		ServerResponse: googleapi.ServerResponse{
@@ -5022,7 +5041,7 @@ func (c *OperationsListCall) Header() http.Header {
 
 func (c *OperationsListCall) doRequest(alt string) (*http.Response, error) {
 	reqHeaders := make(http.Header)
-	reqHeaders.Set("x-goog-api-client", "gl-go/"+gensupport.GoVersion()+" gdcl/20211201")
+	reqHeaders.Set("x-goog-api-client", "gl-go/"+gensupport.GoVersion()+" gdcl/"+internal.Version)
 	for k, v := range c.header_ {
 		reqHeaders[k] = v
 	}
@@ -5057,17 +5076,17 @@ func (c *OperationsListCall) Do(opts ...googleapi.CallOption) (*ListOperationsRe
 		if res.Body != nil {
 			res.Body.Close()
 		}
-		return nil, &googleapi.Error{
+		return nil, gensupport.WrapError(&googleapi.Error{
 			Code:   res.StatusCode,
 			Header: res.Header,
-		}
+		})
 	}
 	if err != nil {
 		return nil, err
 	}
 	defer googleapi.CloseBody(res)
 	if err := googleapi.CheckResponse(res); err != nil {
-		return nil, err
+		return nil, gensupport.WrapError(err)
 	}
 	ret := &ListOperationsResponse{
 		ServerResponse: googleapi.ServerResponse{
@@ -5191,7 +5210,7 @@ func (c *ServicesCreateCall) Header() http.Header {
 
 func (c *ServicesCreateCall) doRequest(alt string) (*http.Response, error) {
 	reqHeaders := make(http.Header)
-	reqHeaders.Set("x-goog-api-client", "gl-go/"+gensupport.GoVersion()+" gdcl/20211201")
+	reqHeaders.Set("x-goog-api-client", "gl-go/"+gensupport.GoVersion()+" gdcl/"+internal.Version)
 	for k, v := range c.header_ {
 		reqHeaders[k] = v
 	}
@@ -5228,17 +5247,17 @@ func (c *ServicesCreateCall) Do(opts ...googleapi.CallOption) (*Operation, error
 		if res.Body != nil {
 			res.Body.Close()
 		}
-		return nil, &googleapi.Error{
+		return nil, gensupport.WrapError(&googleapi.Error{
 			Code:   res.StatusCode,
 			Header: res.Header,
-		}
+		})
 	}
 	if err != nil {
 		return nil, err
 	}
 	defer googleapi.CloseBody(res)
 	if err := googleapi.CheckResponse(res); err != nil {
-		return nil, err
+		return nil, gensupport.WrapError(err)
 	}
 	ret := &Operation{
 		ServerResponse: googleapi.ServerResponse{
@@ -5288,9 +5307,9 @@ type ServicesDeleteCall struct {
 // service producers may call UndeleteService to restore the service.
 // After 30 days, the service will be permanently deleted. Operation
 //
-// - serviceName: The name of the service. See the overview
-//   (/service-management/overview) for naming requirements. For
-//   example: `example.googleapis.com`.
+//   - serviceName: The name of the service. See the overview
+//     (https://cloud.google.com/service-management/overview) for naming
+//     requirements. For example: `example.googleapis.com`.
 func (r *ServicesService) Delete(serviceName string) *ServicesDeleteCall {
 	c := &ServicesDeleteCall{s: r.s, urlParams_: make(gensupport.URLParams)}
 	c.serviceName = serviceName
@@ -5324,7 +5343,7 @@ func (c *ServicesDeleteCall) Header() http.Header {
 
 func (c *ServicesDeleteCall) doRequest(alt string) (*http.Response, error) {
 	reqHeaders := make(http.Header)
-	reqHeaders.Set("x-goog-api-client", "gl-go/"+gensupport.GoVersion()+" gdcl/20211201")
+	reqHeaders.Set("x-goog-api-client", "gl-go/"+gensupport.GoVersion()+" gdcl/"+internal.Version)
 	for k, v := range c.header_ {
 		reqHeaders[k] = v
 	}
@@ -5359,17 +5378,17 @@ func (c *ServicesDeleteCall) Do(opts ...googleapi.CallOption) (*Operation, error
 		if res.Body != nil {
 			res.Body.Close()
 		}
-		return nil, &googleapi.Error{
+		return nil, gensupport.WrapError(&googleapi.Error{
 			Code:   res.StatusCode,
 			Header: res.Header,
-		}
+		})
 	}
 	if err != nil {
 		return nil, err
 	}
 	defer googleapi.CloseBody(res)
 	if err := googleapi.CheckResponse(res); err != nil {
-		return nil, err
+		return nil, gensupport.WrapError(err)
 	}
 	ret := &Operation{
 		ServerResponse: googleapi.ServerResponse{
@@ -5392,7 +5411,7 @@ func (c *ServicesDeleteCall) Do(opts ...googleapi.CallOption) (*Operation, error
 	//   ],
 	//   "parameters": {
 	//     "serviceName": {
-	//       "description": "Required. The name of the service. See the [overview](/service-management/overview) for naming requirements. For example: `example.googleapis.com`.",
+	//       "description": "Required. The name of the service. See the [overview](https://cloud.google.com/service-management/overview) for naming requirements. For example: `example.googleapis.com`.",
 	//       "location": "path",
 	//       "required": true,
 	//       "type": "string"
@@ -5463,7 +5482,7 @@ func (c *ServicesGenerateConfigReportCall) Header() http.Header {
 
 func (c *ServicesGenerateConfigReportCall) doRequest(alt string) (*http.Response, error) {
 	reqHeaders := make(http.Header)
-	reqHeaders.Set("x-goog-api-client", "gl-go/"+gensupport.GoVersion()+" gdcl/20211201")
+	reqHeaders.Set("x-goog-api-client", "gl-go/"+gensupport.GoVersion()+" gdcl/"+internal.Version)
 	for k, v := range c.header_ {
 		reqHeaders[k] = v
 	}
@@ -5500,17 +5519,17 @@ func (c *ServicesGenerateConfigReportCall) Do(opts ...googleapi.CallOption) (*Ge
 		if res.Body != nil {
 			res.Body.Close()
 		}
-		return nil, &googleapi.Error{
+		return nil, gensupport.WrapError(&googleapi.Error{
 			Code:   res.StatusCode,
 			Header: res.Header,
-		}
+		})
 	}
 	if err != nil {
 		return nil, err
 	}
 	defer googleapi.CloseBody(res)
 	if err := googleapi.CheckResponse(res); err != nil {
-		return nil, err
+		return nil, gensupport.WrapError(err)
 	}
 	ret := &GenerateConfigReportResponse{
 		ServerResponse: googleapi.ServerResponse{
@@ -5559,9 +5578,9 @@ type ServicesGetCall struct {
 // Get: Gets a managed service. Authentication is required unless the
 // service is public.
 //
-// - serviceName: The name of the service. See the `ServiceManager`
-//   overview for naming requirements. For example:
-//   `example.googleapis.com`.
+//   - serviceName: The name of the service. See the `ServiceManager`
+//     overview for naming requirements. For example:
+//     `example.googleapis.com`.
 func (r *ServicesService) Get(serviceName string) *ServicesGetCall {
 	c := &ServicesGetCall{s: r.s, urlParams_: make(gensupport.URLParams)}
 	c.serviceName = serviceName
@@ -5605,7 +5624,7 @@ func (c *ServicesGetCall) Header() http.Header {
 
 func (c *ServicesGetCall) doRequest(alt string) (*http.Response, error) {
 	reqHeaders := make(http.Header)
-	reqHeaders.Set("x-goog-api-client", "gl-go/"+gensupport.GoVersion()+" gdcl/20211201")
+	reqHeaders.Set("x-goog-api-client", "gl-go/"+gensupport.GoVersion()+" gdcl/"+internal.Version)
 	for k, v := range c.header_ {
 		reqHeaders[k] = v
 	}
@@ -5643,17 +5662,17 @@ func (c *ServicesGetCall) Do(opts ...googleapi.CallOption) (*ManagedService, err
 		if res.Body != nil {
 			res.Body.Close()
 		}
-		return nil, &googleapi.Error{
+		return nil, gensupport.WrapError(&googleapi.Error{
 			Code:   res.StatusCode,
 			Header: res.Header,
-		}
+		})
 	}
 	if err != nil {
 		return nil, err
 	}
 	defer googleapi.CloseBody(res)
 	if err := googleapi.CheckResponse(res); err != nil {
-		return nil, err
+		return nil, gensupport.WrapError(err)
 	}
 	ret := &ManagedService{
 		ServerResponse: googleapi.ServerResponse{
@@ -5710,9 +5729,9 @@ type ServicesGetConfigCall struct {
 // GetConfig: Gets a service configuration (version) for a managed
 // service.
 //
-// - serviceName: The name of the service. See the overview
-//   (/service-management/overview) for naming requirements. For
-//   example: `example.googleapis.com`.
+//   - serviceName: The name of the service. See the overview
+//     (https://cloud.google.com/service-management/overview) for naming
+//     requirements. For example: `example.googleapis.com`.
 func (r *ServicesService) GetConfig(serviceName string) *ServicesGetConfigCall {
 	c := &ServicesGetConfigCall{s: r.s, urlParams_: make(gensupport.URLParams)}
 	c.serviceName = serviceName
@@ -5731,8 +5750,10 @@ func (c *ServicesGetConfigCall) ConfigId(configId string) *ServicesGetConfigCall
 // Service Config should be returned in the response.
 //
 // Possible values:
-//   "BASIC" - Server response includes all fields except SourceInfo.
-//   "FULL" - Server response includes all fields including SourceInfo.
+//
+//	"BASIC" - Server response includes all fields except SourceInfo.
+//	"FULL" - Server response includes all fields including SourceInfo.
+//
 // SourceFiles are of type 'google.api.servicemanagement.v1.ConfigFile'
 // and are only available for configs created using the
 // SubmitConfigSource method.
@@ -5778,7 +5799,7 @@ func (c *ServicesGetConfigCall) Header() http.Header {
 
 func (c *ServicesGetConfigCall) doRequest(alt string) (*http.Response, error) {
 	reqHeaders := make(http.Header)
-	reqHeaders.Set("x-goog-api-client", "gl-go/"+gensupport.GoVersion()+" gdcl/20211201")
+	reqHeaders.Set("x-goog-api-client", "gl-go/"+gensupport.GoVersion()+" gdcl/"+internal.Version)
 	for k, v := range c.header_ {
 		reqHeaders[k] = v
 	}
@@ -5816,17 +5837,17 @@ func (c *ServicesGetConfigCall) Do(opts ...googleapi.CallOption) (*Service, erro
 		if res.Body != nil {
 			res.Body.Close()
 		}
-		return nil, &googleapi.Error{
+		return nil, gensupport.WrapError(&googleapi.Error{
 			Code:   res.StatusCode,
 			Header: res.Header,
-		}
+		})
 	}
 	if err != nil {
 		return nil, err
 	}
 	defer googleapi.CloseBody(res)
 	if err := googleapi.CheckResponse(res); err != nil {
-		return nil, err
+		return nil, gensupport.WrapError(err)
 	}
 	ret := &Service{
 		ServerResponse: googleapi.ServerResponse{
@@ -5854,7 +5875,7 @@ func (c *ServicesGetConfigCall) Do(opts ...googleapi.CallOption) (*Service, erro
 	//       "type": "string"
 	//     },
 	//     "serviceName": {
-	//       "description": "Required. The name of the service. See the [overview](/service-management/overview) for naming requirements. For example: `example.googleapis.com`.",
+	//       "description": "Required. The name of the service. See the [overview](https://cloud.google.com/service-management/overview) for naming requirements. For example: `example.googleapis.com`.",
 	//       "location": "path",
 	//       "required": true,
 	//       "type": "string"
@@ -5902,9 +5923,10 @@ type ServicesGetIamPolicyCall struct {
 // an empty policy if the resource exists and does not have a policy
 // set.
 //
-// - resource: REQUIRED: The resource for which the policy is being
-//   requested. See the operation documentation for the appropriate
-//   value for this field.
+//   - resource: REQUIRED: The resource for which the policy is being
+//     requested. See Resource names
+//     (https://cloud.google.com/apis/design/resource_names) for the
+//     appropriate value for this field.
 func (r *ServicesService) GetIamPolicy(resource string, getiampolicyrequest *GetIamPolicyRequest) *ServicesGetIamPolicyCall {
 	c := &ServicesGetIamPolicyCall{s: r.s, urlParams_: make(gensupport.URLParams)}
 	c.resource = resource
@@ -5939,7 +5961,7 @@ func (c *ServicesGetIamPolicyCall) Header() http.Header {
 
 func (c *ServicesGetIamPolicyCall) doRequest(alt string) (*http.Response, error) {
 	reqHeaders := make(http.Header)
-	reqHeaders.Set("x-goog-api-client", "gl-go/"+gensupport.GoVersion()+" gdcl/20211201")
+	reqHeaders.Set("x-goog-api-client", "gl-go/"+gensupport.GoVersion()+" gdcl/"+internal.Version)
 	for k, v := range c.header_ {
 		reqHeaders[k] = v
 	}
@@ -5979,17 +6001,17 @@ func (c *ServicesGetIamPolicyCall) Do(opts ...googleapi.CallOption) (*Policy, er
 		if res.Body != nil {
 			res.Body.Close()
 		}
-		return nil, &googleapi.Error{
+		return nil, gensupport.WrapError(&googleapi.Error{
 			Code:   res.StatusCode,
 			Header: res.Header,
-		}
+		})
 	}
 	if err != nil {
 		return nil, err
 	}
 	defer googleapi.CloseBody(res)
 	if err := googleapi.CheckResponse(res); err != nil {
-		return nil, err
+		return nil, gensupport.WrapError(err)
 	}
 	ret := &Policy{
 		ServerResponse: googleapi.ServerResponse{
@@ -6012,7 +6034,7 @@ func (c *ServicesGetIamPolicyCall) Do(opts ...googleapi.CallOption) (*Policy, er
 	//   ],
 	//   "parameters": {
 	//     "resource": {
-	//       "description": "REQUIRED: The resource for which the policy is being requested. See the operation documentation for the appropriate value for this field.",
+	//       "description": "REQUIRED: The resource for which the policy is being requested. See [Resource names](https://cloud.google.com/apis/design/resource_names) for the appropriate value for this field.",
 	//       "location": "path",
 	//       "pattern": "^services/[^/]+$",
 	//       "required": true,
@@ -6064,7 +6086,7 @@ func (c *ServicesListCall) ConsumerId(consumerId string) *ServicesListCall {
 
 // PageSize sets the optional parameter "pageSize": The max number of
 // items to include in the response list. Page size is 50 if not
-// specified. Maximum value is 100.
+// specified. Maximum value is 500.
 func (c *ServicesListCall) PageSize(pageSize int64) *ServicesListCall {
 	c.urlParams_.Set("pageSize", fmt.Sprint(pageSize))
 	return c
@@ -6121,7 +6143,7 @@ func (c *ServicesListCall) Header() http.Header {
 
 func (c *ServicesListCall) doRequest(alt string) (*http.Response, error) {
 	reqHeaders := make(http.Header)
-	reqHeaders.Set("x-goog-api-client", "gl-go/"+gensupport.GoVersion()+" gdcl/20211201")
+	reqHeaders.Set("x-goog-api-client", "gl-go/"+gensupport.GoVersion()+" gdcl/"+internal.Version)
 	for k, v := range c.header_ {
 		reqHeaders[k] = v
 	}
@@ -6156,17 +6178,17 @@ func (c *ServicesListCall) Do(opts ...googleapi.CallOption) (*ListServicesRespon
 		if res.Body != nil {
 			res.Body.Close()
 		}
-		return nil, &googleapi.Error{
+		return nil, gensupport.WrapError(&googleapi.Error{
 			Code:   res.StatusCode,
 			Header: res.Header,
-		}
+		})
 	}
 	if err != nil {
 		return nil, err
 	}
 	defer googleapi.CloseBody(res)
 	if err := googleapi.CheckResponse(res); err != nil {
-		return nil, err
+		return nil, gensupport.WrapError(err)
 	}
 	ret := &ListServicesResponse{
 		ServerResponse: googleapi.ServerResponse{
@@ -6192,7 +6214,7 @@ func (c *ServicesListCall) Do(opts ...googleapi.CallOption) (*ListServicesRespon
 	//       "type": "string"
 	//     },
 	//     "pageSize": {
-	//       "description": "The max number of items to include in the response list. Page size is 50 if not specified. Maximum value is 100.",
+	//       "description": "The max number of items to include in the response list. Page size is 50 if not specified. Maximum value is 500.",
 	//       "format": "int32",
 	//       "location": "query",
 	//       "type": "integer"
@@ -6258,9 +6280,10 @@ type ServicesSetIamPolicyCall struct {
 // resource. Replaces any existing policy. Can return `NOT_FOUND`,
 // `INVALID_ARGUMENT`, and `PERMISSION_DENIED` errors.
 //
-// - resource: REQUIRED: The resource for which the policy is being
-//   specified. See the operation documentation for the appropriate
-//   value for this field.
+//   - resource: REQUIRED: The resource for which the policy is being
+//     specified. See Resource names
+//     (https://cloud.google.com/apis/design/resource_names) for the
+//     appropriate value for this field.
 func (r *ServicesService) SetIamPolicy(resource string, setiampolicyrequest *SetIamPolicyRequest) *ServicesSetIamPolicyCall {
 	c := &ServicesSetIamPolicyCall{s: r.s, urlParams_: make(gensupport.URLParams)}
 	c.resource = resource
@@ -6295,7 +6318,7 @@ func (c *ServicesSetIamPolicyCall) Header() http.Header {
 
 func (c *ServicesSetIamPolicyCall) doRequest(alt string) (*http.Response, error) {
 	reqHeaders := make(http.Header)
-	reqHeaders.Set("x-goog-api-client", "gl-go/"+gensupport.GoVersion()+" gdcl/20211201")
+	reqHeaders.Set("x-goog-api-client", "gl-go/"+gensupport.GoVersion()+" gdcl/"+internal.Version)
 	for k, v := range c.header_ {
 		reqHeaders[k] = v
 	}
@@ -6335,17 +6358,17 @@ func (c *ServicesSetIamPolicyCall) Do(opts ...googleapi.CallOption) (*Policy, er
 		if res.Body != nil {
 			res.Body.Close()
 		}
-		return nil, &googleapi.Error{
+		return nil, gensupport.WrapError(&googleapi.Error{
 			Code:   res.StatusCode,
 			Header: res.Header,
-		}
+		})
 	}
 	if err != nil {
 		return nil, err
 	}
 	defer googleapi.CloseBody(res)
 	if err := googleapi.CheckResponse(res); err != nil {
-		return nil, err
+		return nil, gensupport.WrapError(err)
 	}
 	ret := &Policy{
 		ServerResponse: googleapi.ServerResponse{
@@ -6368,7 +6391,7 @@ func (c *ServicesSetIamPolicyCall) Do(opts ...googleapi.CallOption) (*Policy, er
 	//   ],
 	//   "parameters": {
 	//     "resource": {
-	//       "description": "REQUIRED: The resource for which the policy is being specified. See the operation documentation for the appropriate value for this field.",
+	//       "description": "REQUIRED: The resource for which the policy is being specified. See [Resource names](https://cloud.google.com/apis/design/resource_names) for the appropriate value for this field.",
 	//       "location": "path",
 	//       "pattern": "^services/[^/]+$",
 	//       "required": true,
@@ -6408,9 +6431,10 @@ type ServicesTestIamPermissionsCall struct {
 // and command-line tools, not for authorization checking. This
 // operation may "fail open" without warning.
 //
-// - resource: REQUIRED: The resource for which the policy detail is
-//   being requested. See the operation documentation for the
-//   appropriate value for this field.
+//   - resource: REQUIRED: The resource for which the policy detail is
+//     being requested. See Resource names
+//     (https://cloud.google.com/apis/design/resource_names) for the
+//     appropriate value for this field.
 func (r *ServicesService) TestIamPermissions(resource string, testiampermissionsrequest *TestIamPermissionsRequest) *ServicesTestIamPermissionsCall {
 	c := &ServicesTestIamPermissionsCall{s: r.s, urlParams_: make(gensupport.URLParams)}
 	c.resource = resource
@@ -6445,7 +6469,7 @@ func (c *ServicesTestIamPermissionsCall) Header() http.Header {
 
 func (c *ServicesTestIamPermissionsCall) doRequest(alt string) (*http.Response, error) {
 	reqHeaders := make(http.Header)
-	reqHeaders.Set("x-goog-api-client", "gl-go/"+gensupport.GoVersion()+" gdcl/20211201")
+	reqHeaders.Set("x-goog-api-client", "gl-go/"+gensupport.GoVersion()+" gdcl/"+internal.Version)
 	for k, v := range c.header_ {
 		reqHeaders[k] = v
 	}
@@ -6485,17 +6509,17 @@ func (c *ServicesTestIamPermissionsCall) Do(opts ...googleapi.CallOption) (*Test
 		if res.Body != nil {
 			res.Body.Close()
 		}
-		return nil, &googleapi.Error{
+		return nil, gensupport.WrapError(&googleapi.Error{
 			Code:   res.StatusCode,
 			Header: res.Header,
-		}
+		})
 	}
 	if err != nil {
 		return nil, err
 	}
 	defer googleapi.CloseBody(res)
 	if err := googleapi.CheckResponse(res); err != nil {
-		return nil, err
+		return nil, gensupport.WrapError(err)
 	}
 	ret := &TestIamPermissionsResponse{
 		ServerResponse: googleapi.ServerResponse{
@@ -6518,7 +6542,7 @@ func (c *ServicesTestIamPermissionsCall) Do(opts ...googleapi.CallOption) (*Test
 	//   ],
 	//   "parameters": {
 	//     "resource": {
-	//       "description": "REQUIRED: The resource for which the policy detail is being requested. See the operation documentation for the appropriate value for this field.",
+	//       "description": "REQUIRED: The resource for which the policy detail is being requested. See [Resource names](https://cloud.google.com/apis/design/resource_names) for the appropriate value for this field.",
 	//       "location": "path",
 	//       "pattern": "^services/[^/]+$",
 	//       "required": true,
@@ -6557,9 +6581,9 @@ type ServicesUndeleteCall struct {
 // was deleted. The target service must exist and must have been deleted
 // within the last 30 days. Operation
 //
-// - serviceName: The name of the service. See the overview
-//   (/service-management/overview) for naming requirements. For
-//   example: `example.googleapis.com`.
+//   - serviceName: The name of the service. See the overview
+//     (https://cloud.google.com/service-management/overview) for naming
+//     requirements. For example: `example.googleapis.com`.
 func (r *ServicesService) Undelete(serviceName string) *ServicesUndeleteCall {
 	c := &ServicesUndeleteCall{s: r.s, urlParams_: make(gensupport.URLParams)}
 	c.serviceName = serviceName
@@ -6593,7 +6617,7 @@ func (c *ServicesUndeleteCall) Header() http.Header {
 
 func (c *ServicesUndeleteCall) doRequest(alt string) (*http.Response, error) {
 	reqHeaders := make(http.Header)
-	reqHeaders.Set("x-goog-api-client", "gl-go/"+gensupport.GoVersion()+" gdcl/20211201")
+	reqHeaders.Set("x-goog-api-client", "gl-go/"+gensupport.GoVersion()+" gdcl/"+internal.Version)
 	for k, v := range c.header_ {
 		reqHeaders[k] = v
 	}
@@ -6628,17 +6652,17 @@ func (c *ServicesUndeleteCall) Do(opts ...googleapi.CallOption) (*Operation, err
 		if res.Body != nil {
 			res.Body.Close()
 		}
-		return nil, &googleapi.Error{
+		return nil, gensupport.WrapError(&googleapi.Error{
 			Code:   res.StatusCode,
 			Header: res.Header,
-		}
+		})
 	}
 	if err != nil {
 		return nil, err
 	}
 	defer googleapi.CloseBody(res)
 	if err := googleapi.CheckResponse(res); err != nil {
-		return nil, err
+		return nil, gensupport.WrapError(err)
 	}
 	ret := &Operation{
 		ServerResponse: googleapi.ServerResponse{
@@ -6661,7 +6685,7 @@ func (c *ServicesUndeleteCall) Do(opts ...googleapi.CallOption) (*Operation, err
 	//   ],
 	//   "parameters": {
 	//     "serviceName": {
-	//       "description": "Required. The name of the service. See the [overview](/service-management/overview) for naming requirements. For example: `example.googleapis.com`.",
+	//       "description": "Required. The name of the service. See the [overview](https://cloud.google.com/service-management/overview) for naming requirements. For example: `example.googleapis.com`.",
 	//       "location": "path",
 	//       "required": true,
 	//       "type": "string"
@@ -6697,9 +6721,9 @@ type ServicesConfigsCreateCall struct {
 // and ones referenced by existing rollouts are kept for each service.
 // The rest will be deleted eventually.
 //
-// - serviceName: The name of the service. See the overview
-//   (/service-management/overview) for naming requirements. For
-//   example: `example.googleapis.com`.
+//   - serviceName: The name of the service. See the overview
+//     (https://cloud.google.com/service-management/overview) for naming
+//     requirements. For example: `example.googleapis.com`.
 func (r *ServicesConfigsService) Create(serviceName string, service *Service) *ServicesConfigsCreateCall {
 	c := &ServicesConfigsCreateCall{s: r.s, urlParams_: make(gensupport.URLParams)}
 	c.serviceName = serviceName
@@ -6734,7 +6758,7 @@ func (c *ServicesConfigsCreateCall) Header() http.Header {
 
 func (c *ServicesConfigsCreateCall) doRequest(alt string) (*http.Response, error) {
 	reqHeaders := make(http.Header)
-	reqHeaders.Set("x-goog-api-client", "gl-go/"+gensupport.GoVersion()+" gdcl/20211201")
+	reqHeaders.Set("x-goog-api-client", "gl-go/"+gensupport.GoVersion()+" gdcl/"+internal.Version)
 	for k, v := range c.header_ {
 		reqHeaders[k] = v
 	}
@@ -6774,17 +6798,17 @@ func (c *ServicesConfigsCreateCall) Do(opts ...googleapi.CallOption) (*Service, 
 		if res.Body != nil {
 			res.Body.Close()
 		}
-		return nil, &googleapi.Error{
+		return nil, gensupport.WrapError(&googleapi.Error{
 			Code:   res.StatusCode,
 			Header: res.Header,
-		}
+		})
 	}
 	if err != nil {
 		return nil, err
 	}
 	defer googleapi.CloseBody(res)
 	if err := googleapi.CheckResponse(res); err != nil {
-		return nil, err
+		return nil, gensupport.WrapError(err)
 	}
 	ret := &Service{
 		ServerResponse: googleapi.ServerResponse{
@@ -6807,7 +6831,7 @@ func (c *ServicesConfigsCreateCall) Do(opts ...googleapi.CallOption) (*Service, 
 	//   ],
 	//   "parameters": {
 	//     "serviceName": {
-	//       "description": "Required. The name of the service. See the [overview](/service-management/overview) for naming requirements. For example: `example.googleapis.com`.",
+	//       "description": "Required. The name of the service. See the [overview](https://cloud.google.com/service-management/overview) for naming requirements. For example: `example.googleapis.com`.",
 	//       "location": "path",
 	//       "required": true,
 	//       "type": "string"
@@ -6842,12 +6866,12 @@ type ServicesConfigsGetCall struct {
 
 // Get: Gets a service configuration (version) for a managed service.
 //
-// - configId: The id of the service configuration resource. This field
-//   must be specified for the server to return all fields, including
-//   `SourceInfo`.
-// - serviceName: The name of the service. See the overview
-//   (/service-management/overview) for naming requirements. For
-//   example: `example.googleapis.com`.
+//   - configId: The id of the service configuration resource. This field
+//     must be specified for the server to return all fields, including
+//     `SourceInfo`.
+//   - serviceName: The name of the service. See the overview
+//     (https://cloud.google.com/service-management/overview) for naming
+//     requirements. For example: `example.googleapis.com`.
 func (r *ServicesConfigsService) Get(serviceName string, configId string) *ServicesConfigsGetCall {
 	c := &ServicesConfigsGetCall{s: r.s, urlParams_: make(gensupport.URLParams)}
 	c.serviceName = serviceName
@@ -6859,8 +6883,10 @@ func (r *ServicesConfigsService) Get(serviceName string, configId string) *Servi
 // Service Config should be returned in the response.
 //
 // Possible values:
-//   "BASIC" - Server response includes all fields except SourceInfo.
-//   "FULL" - Server response includes all fields including SourceInfo.
+//
+//	"BASIC" - Server response includes all fields except SourceInfo.
+//	"FULL" - Server response includes all fields including SourceInfo.
+//
 // SourceFiles are of type 'google.api.servicemanagement.v1.ConfigFile'
 // and are only available for configs created using the
 // SubmitConfigSource method.
@@ -6906,7 +6932,7 @@ func (c *ServicesConfigsGetCall) Header() http.Header {
 
 func (c *ServicesConfigsGetCall) doRequest(alt string) (*http.Response, error) {
 	reqHeaders := make(http.Header)
-	reqHeaders.Set("x-goog-api-client", "gl-go/"+gensupport.GoVersion()+" gdcl/20211201")
+	reqHeaders.Set("x-goog-api-client", "gl-go/"+gensupport.GoVersion()+" gdcl/"+internal.Version)
 	for k, v := range c.header_ {
 		reqHeaders[k] = v
 	}
@@ -6945,17 +6971,17 @@ func (c *ServicesConfigsGetCall) Do(opts ...googleapi.CallOption) (*Service, err
 		if res.Body != nil {
 			res.Body.Close()
 		}
-		return nil, &googleapi.Error{
+		return nil, gensupport.WrapError(&googleapi.Error{
 			Code:   res.StatusCode,
 			Header: res.Header,
-		}
+		})
 	}
 	if err != nil {
 		return nil, err
 	}
 	defer googleapi.CloseBody(res)
 	if err := googleapi.CheckResponse(res); err != nil {
-		return nil, err
+		return nil, gensupport.WrapError(err)
 	}
 	ret := &Service{
 		ServerResponse: googleapi.ServerResponse{
@@ -6985,7 +7011,7 @@ func (c *ServicesConfigsGetCall) Do(opts ...googleapi.CallOption) (*Service, err
 	//       "type": "string"
 	//     },
 	//     "serviceName": {
-	//       "description": "Required. The name of the service. See the [overview](/service-management/overview) for naming requirements. For example: `example.googleapis.com`.",
+	//       "description": "Required. The name of the service. See the [overview](https://cloud.google.com/service-management/overview) for naming requirements. For example: `example.googleapis.com`.",
 	//       "location": "path",
 	//       "required": true,
 	//       "type": "string"
@@ -7032,9 +7058,9 @@ type ServicesConfigsListCall struct {
 // List: Lists the history of the service configuration for a managed
 // service, from the newest to the oldest.
 //
-// - serviceName: The name of the service. See the overview
-//   (/service-management/overview) for naming requirements. For
-//   example: `example.googleapis.com`.
+//   - serviceName: The name of the service. See the overview
+//     (https://cloud.google.com/service-management/overview) for naming
+//     requirements. For example: `example.googleapis.com`.
 func (r *ServicesConfigsService) List(serviceName string) *ServicesConfigsListCall {
 	c := &ServicesConfigsListCall{s: r.s, urlParams_: make(gensupport.URLParams)}
 	c.serviceName = serviceName
@@ -7093,7 +7119,7 @@ func (c *ServicesConfigsListCall) Header() http.Header {
 
 func (c *ServicesConfigsListCall) doRequest(alt string) (*http.Response, error) {
 	reqHeaders := make(http.Header)
-	reqHeaders.Set("x-goog-api-client", "gl-go/"+gensupport.GoVersion()+" gdcl/20211201")
+	reqHeaders.Set("x-goog-api-client", "gl-go/"+gensupport.GoVersion()+" gdcl/"+internal.Version)
 	for k, v := range c.header_ {
 		reqHeaders[k] = v
 	}
@@ -7131,17 +7157,17 @@ func (c *ServicesConfigsListCall) Do(opts ...googleapi.CallOption) (*ListService
 		if res.Body != nil {
 			res.Body.Close()
 		}
-		return nil, &googleapi.Error{
+		return nil, gensupport.WrapError(&googleapi.Error{
 			Code:   res.StatusCode,
 			Header: res.Header,
-		}
+		})
 	}
 	if err != nil {
 		return nil, err
 	}
 	defer googleapi.CloseBody(res)
 	if err := googleapi.CheckResponse(res); err != nil {
-		return nil, err
+		return nil, gensupport.WrapError(err)
 	}
 	ret := &ListServiceConfigsResponse{
 		ServerResponse: googleapi.ServerResponse{
@@ -7175,7 +7201,7 @@ func (c *ServicesConfigsListCall) Do(opts ...googleapi.CallOption) (*ListService
 	//       "type": "string"
 	//     },
 	//     "serviceName": {
-	//       "description": "Required. The name of the service. See the [overview](/service-management/overview) for naming requirements. For example: `example.googleapis.com`.",
+	//       "description": "Required. The name of the service. See the [overview](https://cloud.google.com/service-management/overview) for naming requirements. For example: `example.googleapis.com`.",
 	//       "location": "path",
 	//       "required": true,
 	//       "type": "string"
@@ -7236,9 +7262,9 @@ type ServicesConfigsSubmitCall struct {
 // and ones referenced by existing service configurtions are kept for
 // each service. The rest will be deleted eventually. Operation
 //
-// - serviceName: The name of the service. See the overview
-//   (/service-management/overview) for naming requirements. For
-//   example: `example.googleapis.com`.
+//   - serviceName: The name of the service. See the overview
+//     (https://cloud.google.com/service-management/overview) for naming
+//     requirements. For example: `example.googleapis.com`.
 func (r *ServicesConfigsService) Submit(serviceName string, submitconfigsourcerequest *SubmitConfigSourceRequest) *ServicesConfigsSubmitCall {
 	c := &ServicesConfigsSubmitCall{s: r.s, urlParams_: make(gensupport.URLParams)}
 	c.serviceName = serviceName
@@ -7273,7 +7299,7 @@ func (c *ServicesConfigsSubmitCall) Header() http.Header {
 
 func (c *ServicesConfigsSubmitCall) doRequest(alt string) (*http.Response, error) {
 	reqHeaders := make(http.Header)
-	reqHeaders.Set("x-goog-api-client", "gl-go/"+gensupport.GoVersion()+" gdcl/20211201")
+	reqHeaders.Set("x-goog-api-client", "gl-go/"+gensupport.GoVersion()+" gdcl/"+internal.Version)
 	for k, v := range c.header_ {
 		reqHeaders[k] = v
 	}
@@ -7313,17 +7339,17 @@ func (c *ServicesConfigsSubmitCall) Do(opts ...googleapi.CallOption) (*Operation
 		if res.Body != nil {
 			res.Body.Close()
 		}
-		return nil, &googleapi.Error{
+		return nil, gensupport.WrapError(&googleapi.Error{
 			Code:   res.StatusCode,
 			Header: res.Header,
-		}
+		})
 	}
 	if err != nil {
 		return nil, err
 	}
 	defer googleapi.CloseBody(res)
 	if err := googleapi.CheckResponse(res); err != nil {
-		return nil, err
+		return nil, gensupport.WrapError(err)
 	}
 	ret := &Operation{
 		ServerResponse: googleapi.ServerResponse{
@@ -7346,7 +7372,7 @@ func (c *ServicesConfigsSubmitCall) Do(opts ...googleapi.CallOption) (*Operation
 	//   ],
 	//   "parameters": {
 	//     "serviceName": {
-	//       "description": "Required. The name of the service. See the [overview](/service-management/overview) for naming requirements. For example: `example.googleapis.com`.",
+	//       "description": "Required. The name of the service. See the [overview](https://cloud.google.com/service-management/overview) for naming requirements. For example: `example.googleapis.com`.",
 	//       "location": "path",
 	//       "required": true,
 	//       "type": "string"
@@ -7382,9 +7408,10 @@ type ServicesConsumersGetIamPolicyCall struct {
 // an empty policy if the resource exists and does not have a policy
 // set.
 //
-// - resource: REQUIRED: The resource for which the policy is being
-//   requested. See the operation documentation for the appropriate
-//   value for this field.
+//   - resource: REQUIRED: The resource for which the policy is being
+//     requested. See Resource names
+//     (https://cloud.google.com/apis/design/resource_names) for the
+//     appropriate value for this field.
 func (r *ServicesConsumersService) GetIamPolicy(resource string, getiampolicyrequest *GetIamPolicyRequest) *ServicesConsumersGetIamPolicyCall {
 	c := &ServicesConsumersGetIamPolicyCall{s: r.s, urlParams_: make(gensupport.URLParams)}
 	c.resource = resource
@@ -7419,7 +7446,7 @@ func (c *ServicesConsumersGetIamPolicyCall) Header() http.Header {
 
 func (c *ServicesConsumersGetIamPolicyCall) doRequest(alt string) (*http.Response, error) {
 	reqHeaders := make(http.Header)
-	reqHeaders.Set("x-goog-api-client", "gl-go/"+gensupport.GoVersion()+" gdcl/20211201")
+	reqHeaders.Set("x-goog-api-client", "gl-go/"+gensupport.GoVersion()+" gdcl/"+internal.Version)
 	for k, v := range c.header_ {
 		reqHeaders[k] = v
 	}
@@ -7459,17 +7486,17 @@ func (c *ServicesConsumersGetIamPolicyCall) Do(opts ...googleapi.CallOption) (*P
 		if res.Body != nil {
 			res.Body.Close()
 		}
-		return nil, &googleapi.Error{
+		return nil, gensupport.WrapError(&googleapi.Error{
 			Code:   res.StatusCode,
 			Header: res.Header,
-		}
+		})
 	}
 	if err != nil {
 		return nil, err
 	}
 	defer googleapi.CloseBody(res)
 	if err := googleapi.CheckResponse(res); err != nil {
-		return nil, err
+		return nil, gensupport.WrapError(err)
 	}
 	ret := &Policy{
 		ServerResponse: googleapi.ServerResponse{
@@ -7492,7 +7519,7 @@ func (c *ServicesConsumersGetIamPolicyCall) Do(opts ...googleapi.CallOption) (*P
 	//   ],
 	//   "parameters": {
 	//     "resource": {
-	//       "description": "REQUIRED: The resource for which the policy is being requested. See the operation documentation for the appropriate value for this field.",
+	//       "description": "REQUIRED: The resource for which the policy is being requested. See [Resource names](https://cloud.google.com/apis/design/resource_names) for the appropriate value for this field.",
 	//       "location": "path",
 	//       "pattern": "^services/[^/]+/consumers/[^/]+$",
 	//       "required": true,
@@ -7531,9 +7558,10 @@ type ServicesConsumersSetIamPolicyCall struct {
 // resource. Replaces any existing policy. Can return `NOT_FOUND`,
 // `INVALID_ARGUMENT`, and `PERMISSION_DENIED` errors.
 //
-// - resource: REQUIRED: The resource for which the policy is being
-//   specified. See the operation documentation for the appropriate
-//   value for this field.
+//   - resource: REQUIRED: The resource for which the policy is being
+//     specified. See Resource names
+//     (https://cloud.google.com/apis/design/resource_names) for the
+//     appropriate value for this field.
 func (r *ServicesConsumersService) SetIamPolicy(resource string, setiampolicyrequest *SetIamPolicyRequest) *ServicesConsumersSetIamPolicyCall {
 	c := &ServicesConsumersSetIamPolicyCall{s: r.s, urlParams_: make(gensupport.URLParams)}
 	c.resource = resource
@@ -7568,7 +7596,7 @@ func (c *ServicesConsumersSetIamPolicyCall) Header() http.Header {
 
 func (c *ServicesConsumersSetIamPolicyCall) doRequest(alt string) (*http.Response, error) {
 	reqHeaders := make(http.Header)
-	reqHeaders.Set("x-goog-api-client", "gl-go/"+gensupport.GoVersion()+" gdcl/20211201")
+	reqHeaders.Set("x-goog-api-client", "gl-go/"+gensupport.GoVersion()+" gdcl/"+internal.Version)
 	for k, v := range c.header_ {
 		reqHeaders[k] = v
 	}
@@ -7608,17 +7636,17 @@ func (c *ServicesConsumersSetIamPolicyCall) Do(opts ...googleapi.CallOption) (*P
 		if res.Body != nil {
 			res.Body.Close()
 		}
-		return nil, &googleapi.Error{
+		return nil, gensupport.WrapError(&googleapi.Error{
 			Code:   res.StatusCode,
 			Header: res.Header,
-		}
+		})
 	}
 	if err != nil {
 		return nil, err
 	}
 	defer googleapi.CloseBody(res)
 	if err := googleapi.CheckResponse(res); err != nil {
-		return nil, err
+		return nil, gensupport.WrapError(err)
 	}
 	ret := &Policy{
 		ServerResponse: googleapi.ServerResponse{
@@ -7641,7 +7669,7 @@ func (c *ServicesConsumersSetIamPolicyCall) Do(opts ...googleapi.CallOption) (*P
 	//   ],
 	//   "parameters": {
 	//     "resource": {
-	//       "description": "REQUIRED: The resource for which the policy is being specified. See the operation documentation for the appropriate value for this field.",
+	//       "description": "REQUIRED: The resource for which the policy is being specified. See [Resource names](https://cloud.google.com/apis/design/resource_names) for the appropriate value for this field.",
 	//       "location": "path",
 	//       "pattern": "^services/[^/]+/consumers/[^/]+$",
 	//       "required": true,
@@ -7681,9 +7709,10 @@ type ServicesConsumersTestIamPermissionsCall struct {
 // and command-line tools, not for authorization checking. This
 // operation may "fail open" without warning.
 //
-// - resource: REQUIRED: The resource for which the policy detail is
-//   being requested. See the operation documentation for the
-//   appropriate value for this field.
+//   - resource: REQUIRED: The resource for which the policy detail is
+//     being requested. See Resource names
+//     (https://cloud.google.com/apis/design/resource_names) for the
+//     appropriate value for this field.
 func (r *ServicesConsumersService) TestIamPermissions(resource string, testiampermissionsrequest *TestIamPermissionsRequest) *ServicesConsumersTestIamPermissionsCall {
 	c := &ServicesConsumersTestIamPermissionsCall{s: r.s, urlParams_: make(gensupport.URLParams)}
 	c.resource = resource
@@ -7718,7 +7747,7 @@ func (c *ServicesConsumersTestIamPermissionsCall) Header() http.Header {
 
 func (c *ServicesConsumersTestIamPermissionsCall) doRequest(alt string) (*http.Response, error) {
 	reqHeaders := make(http.Header)
-	reqHeaders.Set("x-goog-api-client", "gl-go/"+gensupport.GoVersion()+" gdcl/20211201")
+	reqHeaders.Set("x-goog-api-client", "gl-go/"+gensupport.GoVersion()+" gdcl/"+internal.Version)
 	for k, v := range c.header_ {
 		reqHeaders[k] = v
 	}
@@ -7758,17 +7787,17 @@ func (c *ServicesConsumersTestIamPermissionsCall) Do(opts ...googleapi.CallOptio
 		if res.Body != nil {
 			res.Body.Close()
 		}
-		return nil, &googleapi.Error{
+		return nil, gensupport.WrapError(&googleapi.Error{
 			Code:   res.StatusCode,
 			Header: res.Header,
-		}
+		})
 	}
 	if err != nil {
 		return nil, err
 	}
 	defer googleapi.CloseBody(res)
 	if err := googleapi.CheckResponse(res); err != nil {
-		return nil, err
+		return nil, gensupport.WrapError(err)
 	}
 	ret := &TestIamPermissionsResponse{
 		ServerResponse: googleapi.ServerResponse{
@@ -7791,7 +7820,7 @@ func (c *ServicesConsumersTestIamPermissionsCall) Do(opts ...googleapi.CallOptio
 	//   ],
 	//   "parameters": {
 	//     "resource": {
-	//       "description": "REQUIRED: The resource for which the policy detail is being requested. See the operation documentation for the appropriate value for this field.",
+	//       "description": "REQUIRED: The resource for which the policy detail is being requested. See [Resource names](https://cloud.google.com/apis/design/resource_names) for the appropriate value for this field.",
 	//       "location": "path",
 	//       "pattern": "^services/[^/]+/consumers/[^/]+$",
 	//       "required": true,
@@ -7837,9 +7866,9 @@ type ServicesRolloutsCreateCall struct {
 // set of 100 most recent) rollouts are kept for each service. The rest
 // will be deleted eventually. Operation
 //
-// - serviceName: The name of the service. See the overview
-//   (/service-management/overview) for naming requirements. For
-//   example: `example.googleapis.com`.
+//   - serviceName: The name of the service. See the overview
+//     (https://cloud.google.com/service-management/overview) for naming
+//     requirements. For example: `example.googleapis.com`.
 func (r *ServicesRolloutsService) Create(serviceName string, rollout *Rollout) *ServicesRolloutsCreateCall {
 	c := &ServicesRolloutsCreateCall{s: r.s, urlParams_: make(gensupport.URLParams)}
 	c.serviceName = serviceName
@@ -7874,7 +7903,7 @@ func (c *ServicesRolloutsCreateCall) Header() http.Header {
 
 func (c *ServicesRolloutsCreateCall) doRequest(alt string) (*http.Response, error) {
 	reqHeaders := make(http.Header)
-	reqHeaders.Set("x-goog-api-client", "gl-go/"+gensupport.GoVersion()+" gdcl/20211201")
+	reqHeaders.Set("x-goog-api-client", "gl-go/"+gensupport.GoVersion()+" gdcl/"+internal.Version)
 	for k, v := range c.header_ {
 		reqHeaders[k] = v
 	}
@@ -7914,17 +7943,17 @@ func (c *ServicesRolloutsCreateCall) Do(opts ...googleapi.CallOption) (*Operatio
 		if res.Body != nil {
 			res.Body.Close()
 		}
-		return nil, &googleapi.Error{
+		return nil, gensupport.WrapError(&googleapi.Error{
 			Code:   res.StatusCode,
 			Header: res.Header,
-		}
+		})
 	}
 	if err != nil {
 		return nil, err
 	}
 	defer googleapi.CloseBody(res)
 	if err := googleapi.CheckResponse(res); err != nil {
-		return nil, err
+		return nil, gensupport.WrapError(err)
 	}
 	ret := &Operation{
 		ServerResponse: googleapi.ServerResponse{
@@ -7947,7 +7976,7 @@ func (c *ServicesRolloutsCreateCall) Do(opts ...googleapi.CallOption) (*Operatio
 	//   ],
 	//   "parameters": {
 	//     "serviceName": {
-	//       "description": "Required. The name of the service. See the [overview](/service-management/overview) for naming requirements. For example: `example.googleapis.com`.",
+	//       "description": "Required. The name of the service. See the [overview](https://cloud.google.com/service-management/overview) for naming requirements. For example: `example.googleapis.com`.",
 	//       "location": "path",
 	//       "required": true,
 	//       "type": "string"
@@ -7982,10 +8011,10 @@ type ServicesRolloutsGetCall struct {
 
 // Get: Gets a service configuration rollout.
 //
-// - rolloutId: The id of the rollout resource.
-// - serviceName: The name of the service. See the overview
-//   (/service-management/overview) for naming requirements. For
-//   example: `example.googleapis.com`.
+//   - rolloutId: The id of the rollout resource.
+//   - serviceName: The name of the service. See the overview
+//     (https://cloud.google.com/service-management/overview) for naming
+//     requirements. For example: `example.googleapis.com`.
 func (r *ServicesRolloutsService) Get(serviceName string, rolloutId string) *ServicesRolloutsGetCall {
 	c := &ServicesRolloutsGetCall{s: r.s, urlParams_: make(gensupport.URLParams)}
 	c.serviceName = serviceName
@@ -8030,7 +8059,7 @@ func (c *ServicesRolloutsGetCall) Header() http.Header {
 
 func (c *ServicesRolloutsGetCall) doRequest(alt string) (*http.Response, error) {
 	reqHeaders := make(http.Header)
-	reqHeaders.Set("x-goog-api-client", "gl-go/"+gensupport.GoVersion()+" gdcl/20211201")
+	reqHeaders.Set("x-goog-api-client", "gl-go/"+gensupport.GoVersion()+" gdcl/"+internal.Version)
 	for k, v := range c.header_ {
 		reqHeaders[k] = v
 	}
@@ -8069,17 +8098,17 @@ func (c *ServicesRolloutsGetCall) Do(opts ...googleapi.CallOption) (*Rollout, er
 		if res.Body != nil {
 			res.Body.Close()
 		}
-		return nil, &googleapi.Error{
+		return nil, gensupport.WrapError(&googleapi.Error{
 			Code:   res.StatusCode,
 			Header: res.Header,
-		}
+		})
 	}
 	if err != nil {
 		return nil, err
 	}
 	defer googleapi.CloseBody(res)
 	if err := googleapi.CheckResponse(res); err != nil {
-		return nil, err
+		return nil, gensupport.WrapError(err)
 	}
 	ret := &Rollout{
 		ServerResponse: googleapi.ServerResponse{
@@ -8109,7 +8138,7 @@ func (c *ServicesRolloutsGetCall) Do(opts ...googleapi.CallOption) (*Rollout, er
 	//       "type": "string"
 	//     },
 	//     "serviceName": {
-	//       "description": "Required. The name of the service. See the [overview](/service-management/overview) for naming requirements. For example: `example.googleapis.com`.",
+	//       "description": "Required. The name of the service. See the [overview](https://cloud.google.com/service-management/overview) for naming requirements. For example: `example.googleapis.com`.",
 	//       "location": "path",
 	//       "required": true,
 	//       "type": "string"
@@ -8143,9 +8172,9 @@ type ServicesRolloutsListCall struct {
 // List: Lists the history of the service configuration rollouts for a
 // managed service, from the newest to the oldest.
 //
-// - serviceName: The name of the service. See the overview
-//   (/service-management/overview) for naming requirements. For
-//   example: `example.googleapis.com`.
+//   - serviceName: The name of the service. See the overview
+//     (https://cloud.google.com/service-management/overview) for naming
+//     requirements. For example: `example.googleapis.com`.
 func (r *ServicesRolloutsService) List(serviceName string) *ServicesRolloutsListCall {
 	c := &ServicesRolloutsListCall{s: r.s, urlParams_: make(gensupport.URLParams)}
 	c.serviceName = serviceName
@@ -8154,11 +8183,8 @@ func (r *ServicesRolloutsService) List(serviceName string) *ServicesRolloutsList
 
 // Filter sets the optional parameter "filter": Required. Use `filter`
 // to return subset of rollouts. The following filters are supported: --
-// To limit the results to only those in status
-// (google.api.servicemanagement.v1.RolloutStatus) 'SUCCESS', use
-// filter='status=SUCCESS' -- To limit the results to those in status
-// (google.api.servicemanagement.v1.RolloutStatus) 'CANCELLED' or
-// 'FAILED', use filter='status=CANCELLED OR status=FAILED'
+// By status. For example, `filter='status=SUCCESS'` -- By strategy. For
+// example, `filter='strategy=TrafficPercentStrategy'`
 func (c *ServicesRolloutsListCall) Filter(filter string) *ServicesRolloutsListCall {
 	c.urlParams_.Set("filter", filter)
 	return c
@@ -8216,7 +8242,7 @@ func (c *ServicesRolloutsListCall) Header() http.Header {
 
 func (c *ServicesRolloutsListCall) doRequest(alt string) (*http.Response, error) {
 	reqHeaders := make(http.Header)
-	reqHeaders.Set("x-goog-api-client", "gl-go/"+gensupport.GoVersion()+" gdcl/20211201")
+	reqHeaders.Set("x-goog-api-client", "gl-go/"+gensupport.GoVersion()+" gdcl/"+internal.Version)
 	for k, v := range c.header_ {
 		reqHeaders[k] = v
 	}
@@ -8254,17 +8280,17 @@ func (c *ServicesRolloutsListCall) Do(opts ...googleapi.CallOption) (*ListServic
 		if res.Body != nil {
 			res.Body.Close()
 		}
-		return nil, &googleapi.Error{
+		return nil, gensupport.WrapError(&googleapi.Error{
 			Code:   res.StatusCode,
 			Header: res.Header,
-		}
+		})
 	}
 	if err != nil {
 		return nil, err
 	}
 	defer googleapi.CloseBody(res)
 	if err := googleapi.CheckResponse(res); err != nil {
-		return nil, err
+		return nil, gensupport.WrapError(err)
 	}
 	ret := &ListServiceRolloutsResponse{
 		ServerResponse: googleapi.ServerResponse{
@@ -8287,7 +8313,7 @@ func (c *ServicesRolloutsListCall) Do(opts ...googleapi.CallOption) (*ListServic
 	//   ],
 	//   "parameters": {
 	//     "filter": {
-	//       "description": "Required. Use `filter` to return subset of rollouts. The following filters are supported: -- To limit the results to only those in [status](google.api.servicemanagement.v1.RolloutStatus) 'SUCCESS', use filter='status=SUCCESS' -- To limit the results to those in [status](google.api.servicemanagement.v1.RolloutStatus) 'CANCELLED' or 'FAILED', use filter='status=CANCELLED OR status=FAILED'",
+	//       "description": "Required. Use `filter` to return subset of rollouts. The following filters are supported: -- By status. For example, `filter='status=SUCCESS'` -- By strategy. For example, `filter='strategy=TrafficPercentStrategy'`",
 	//       "location": "query",
 	//       "type": "string"
 	//     },
@@ -8303,7 +8329,7 @@ func (c *ServicesRolloutsListCall) Do(opts ...googleapi.CallOption) (*ListServic
 	//       "type": "string"
 	//     },
 	//     "serviceName": {
-	//       "description": "Required. The name of the service. See the [overview](/service-management/overview) for naming requirements. For example: `example.googleapis.com`.",
+	//       "description": "Required. The name of the service. See the [overview](https://cloud.google.com/service-management/overview) for naming requirements. For example: `example.googleapis.com`.",
 	//       "location": "path",
 	//       "required": true,
 	//       "type": "string"
