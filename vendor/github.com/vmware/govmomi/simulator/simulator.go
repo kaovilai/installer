@@ -1,18 +1,6 @@
-/*
-Copyright (c) 2017-2018 VMware, Inc. All Rights Reserved.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
+// © Broadcom. All Rights Reserved.
+// The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
+// SPDX-License-Identifier: Apache-2.0
 
 package simulator
 
@@ -26,7 +14,6 @@ import (
 	"encoding/pem"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"net"
 	"net/http"
@@ -71,14 +58,13 @@ type Method struct {
 
 // Service decodes incoming requests and dispatches to a Handler
 type Service struct {
-	client *vim25.Client
-	sm     *SessionManager
-	sdk    map[string]*Registry
-	funcs  []handleFunc
-	delay  *DelayConfig
+	sdk   map[string]*Registry
+	funcs []handleFunc
+	delay *DelayConfig
 
 	readAll func(io.Reader) ([]byte, error)
 
+	Context  *Context
 	Listen   *url.URL
 	TLS      *tls.Config
 	ServeMux *http.ServeMux
@@ -96,16 +82,19 @@ type Server struct {
 }
 
 // New returns an initialized simulator Service instance
-func New(instance *ServiceInstance) *Service {
+func New(ctx *Context, instance *ServiceInstance) *Service {
 	s := &Service{
-		readAll: ioutil.ReadAll,
-		sm:      Map.SessionManager(),
+		Context: ctx,
+		readAll: io.ReadAll,
 		sdk:     make(map[string]*Registry),
 	}
-
-	s.client, _ = vim25.NewClient(context.Background(), s)
-
+	s.Context.svc = s
 	return s
+}
+
+func (s *Service) client() *vim25.Client {
+	c, _ := vim25.NewClient(context.Background(), s)
+	return c
 }
 
 type serverFaultBody struct {
@@ -153,12 +142,17 @@ func (s *Service) call(ctx *Context, method *Method) soap.HasFault {
 
 	if session == nil {
 		switch method.Name {
-		case "RetrieveServiceContent", "PbmRetrieveServiceContent", "Fetch", "List", "Login", "LoginByToken", "LoginExtensionByCertificate", "RetrieveProperties", "RetrievePropertiesEx", "CloneSession":
+		case
+			"Login", "LoginByToken", "LoginExtensionByCertificate", "CloneSession", // SessionManager
+			"RetrieveServiceContent", "RetrieveInternalContent", "PbmRetrieveServiceContent", // ServiceContent
+			"Fetch", "RetrieveProperties", "RetrievePropertiesEx", // PropertyCollector
+			"List",                   // lookup service
+			"GetTrustedCertificates": // ssoadmin
 			// ok for now, TODO: authz
 		default:
 			fault := &types.NotAuthenticated{
 				NoPermission: types.NoPermission{
-					Object:      method.This,
+					Object:      &method.This,
 					PrivilegeId: "System.View",
 				},
 			}
@@ -241,17 +235,24 @@ func (s *Service) RoundTrip(ctx context.Context, request, response soap.HasFault
 
 	// Every request has a "This" field.
 	this := req.Elem().FieldByName("This")
+	// Copy request body
+	body := reflect.New(req.Type().Elem())
+	deepCopy(req.Interface(), body.Interface())
 
 	method := &Method{
 		Name: req.Elem().Type().Name(),
 		This: this.Interface().(types.ManagedObjectReference),
-		Body: req.Interface(),
+		Body: body.Interface(),
 	}
 
 	res := s.call(&Context{
-		Map:     Map,
+		Map:     s.Context.Map,
 		Context: ctx,
-		Session: internalSession,
+		Session: &Session{
+			UserSession: internalSession.UserSession,
+			Registry:    internalSession.Registry,
+			Map:         s.Context.Map,
+		},
 	}, method)
 
 	if err := res.Fault(); err != nil {
@@ -313,16 +314,29 @@ type response struct {
 }
 
 func (r *response) MarshalXML(e *xml.Encoder, start xml.StartElement) error {
-	val := reflect.ValueOf(r.Body).Elem().FieldByName("Res")
+	body := reflect.ValueOf(r.Body).Elem()
+	val := body.FieldByName("Res")
 	if !val.IsValid() {
 		return fmt.Errorf("%T: invalid response type (missing 'Res' field)", r.Body)
 	}
 	if val.IsNil() {
 		return fmt.Errorf("%T: invalid response (nil 'Res' field)", r.Body)
 	}
+
+	// Default response namespace
+	ns := "urn:" + r.Namespace
+	// Override namespace from struct tag if defined
+	field, _ := body.Type().FieldByName("Res")
+	if tag := field.Tag.Get("xml"); tag != "" {
+		tags := strings.Split(tag, " ")
+		if len(tags) > 0 && strings.HasPrefix(tags[0], "urn") {
+			ns = tags[0]
+		}
+	}
+
 	res := xml.StartElement{
 		Name: xml.Name{
-			Space: "urn:" + r.Namespace,
+			Space: ns,
 			Local: val.Elem().Type().Name(),
 		},
 	}
@@ -338,8 +352,8 @@ func (r *response) MarshalXML(e *xml.Encoder, start xml.StartElement) error {
 // About generates some info about the simulator.
 func (s *Service) About(w http.ResponseWriter, r *http.Request) {
 	var about struct {
-		Methods []string
-		Types   []string
+		Methods []string `json:"methods"`
+		Types   []string `json:"types"`
 	}
 
 	seen := make(map[string]bool)
@@ -421,7 +435,9 @@ func (s *Service) HandleFunc(pattern string, handler func(http.ResponseWriter, *
 
 // RegisterSDK adds an HTTP handler for the Registry's Path and Namespace.
 // If r.Path is already registered, r's objects are added to the existing Registry.
-func (s *Service) RegisterSDK(r *Registry) {
+// An optional set of aliases can be provided to register the same handler for
+// multiple paths.
+func (s *Service) RegisterSDK(r *Registry, alias ...string) {
 	if existing, ok := s.sdk[r.Path]; ok {
 		for id, obj := range r.objects {
 			existing.objects[id] = obj
@@ -435,6 +451,11 @@ func (s *Service) RegisterSDK(r *Registry) {
 
 	s.sdk[r.Path] = r
 	s.ServeMux.HandleFunc(r.Path, s.ServeSDK)
+
+	for _, p := range alias {
+		s.sdk[p] = r
+		s.ServeMux.HandleFunc(p, s.ServeSDK)
+	}
 }
 
 // StatusSDK can be used to simulate an /sdk HTTP response code other than 200.
@@ -475,7 +496,6 @@ func (s *Service) ServeSDK(w http.ResponseWriter, r *http.Request) {
 		Map:     s.sdk[r.URL.Path],
 		Context: context.Background(),
 	}
-	ctx.Map.WithLock(ctx, s.sm, ctx.mapSession)
 
 	var res soap.HasFault
 	var soapBody interface{}
@@ -489,6 +509,7 @@ func (s *Service) ServeSDK(w http.ResponseWriter, r *http.Request) {
 			// Redirect any Fetch method calls to the PropertyCollector singleton
 			method.This = ctx.Map.content().PropertyCollector
 		}
+		ctx.Map.WithLock(ctx, ctx.sessionManager(), ctx.mapSession)
 		res = s.call(ctx, method)
 	}
 
@@ -544,7 +565,7 @@ func (s *Service) ServeSDK(w http.ResponseWriter, r *http.Request) {
 func (s *Service) findDatastore(query url.Values) (*Datastore, error) {
 	ctx := context.Background()
 
-	finder := find.NewFinder(s.client, false)
+	finder := find.NewFinder(s.client(), false)
 	dc, err := finder.DatacenterOrDefault(ctx, query.Get("dcPath"))
 	if err != nil {
 		return nil, err
@@ -557,7 +578,7 @@ func (s *Service) findDatastore(query url.Values) (*Datastore, error) {
 		return nil, err
 	}
 
-	return Map.Get(ds.Reference()).(*Datastore), nil
+	return s.Context.Map.Get(ds.Reference()).(*Datastore), nil
 }
 
 const folderPrefix = "/folder/"
@@ -571,8 +592,13 @@ func (s *Service) ServeDatastore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if strings.Contains(r.URL.Path, "..") {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
 	r.URL.Path = strings.TrimPrefix(r.URL.Path, folderPrefix)
-	p := path.Join(ds.Info.GetDatastoreInfo().Url, r.URL.Path)
+	p := ds.resolve(s.Context, r.URL.Path)
 
 	switch r.Method {
 	case http.MethodPost:
@@ -599,7 +625,11 @@ func (s *Service) ServeDatastore(w http.ResponseWriter, r *http.Request) {
 
 		_, _ = io.Copy(f, r.Body)
 	default:
-		fs := http.FileServer(http.Dir(ds.Info.GetDatastoreInfo().Url))
+		// ds.resolve() may have translated vsan friendly name to uuid,
+		// apply the same to the Request.URL.Path
+		r.URL.Path = strings.TrimPrefix(p, ds.Summary.Url)
+
+		fs := http.FileServer(http.Dir(ds.Summary.Url))
 
 		fs.ServeHTTP(w, r)
 	}
@@ -618,7 +648,23 @@ func (s *Service) ServiceVersions(w http.ResponseWriter, r *http.Request) {
  </namespace>
 </namespaces>
 `
-	fmt.Fprintf(w, versions, s.client.ServiceContent.About.ApiVersion)
+	fmt.Fprintf(w, versions, s.Context.Map.content().About.ApiVersion)
+}
+
+// ServiceVersionsVsan handler for the /sdk/vsanServiceVersions.xml path.
+func (s *Service) ServiceVersionsVsan(w http.ResponseWriter, r *http.Request) {
+	const versions = xml.Header + `<namespaces version="1.0">
+ <namespace>
+  <name>urn:vsan</name>
+  <version>%s</version>
+  <priorVersions>
+   <version>6.7</version>
+   <version>6.6</version>
+  </priorVersions>
+ </namespace>
+</namespaces>
+`
+	fmt.Fprintf(w, versions, s.Context.Map.content().About.ApiVersion)
 }
 
 // defaultIP returns addr.IP if specified, otherwise attempts to find a non-loopback ipv4 IP
@@ -654,13 +700,12 @@ func defaultIP(addr *net.TCPAddr) string {
 
 // NewServer returns an http Server instance for the given service
 func (s *Service) NewServer() *Server {
-	s.RegisterSDK(Map)
+	ctx := s.Context
+	s.RegisterSDK(ctx.Map, ctx.Map.Path+"/vimService")
 
 	mux := s.ServeMux
-	vim := Map.Path + "/vimService"
-	s.sdk[vim] = s.sdk[vim25.Path]
-	mux.HandleFunc(vim, s.ServeSDK)
-	mux.HandleFunc(Map.Path+"/vimServiceVersions.xml", s.ServiceVersions)
+	mux.HandleFunc(ctx.Map.Path+"/vimServiceVersions.xml", s.ServiceVersions)
+	mux.HandleFunc(ctx.Map.Path+"/vsanServiceVersions.xml", s.ServiceVersionsVsan)
 	mux.HandleFunc(folderPrefix, s.ServeDatastore)
 	mux.HandleFunc(guestPrefix, ServeGuest)
 	mux.HandleFunc(nfcPrefix, ServeNFC)
@@ -675,17 +720,17 @@ func (s *Service) NewServer() *Server {
 	u := &url.URL{
 		Scheme: "http",
 		Host:   net.JoinHostPort(defaultIP(addr), port),
-		Path:   Map.Path,
+		Path:   ctx.Map.Path,
 	}
 	if s.TLS != nil {
 		u.Scheme += "s"
 	}
 
 	// Redirect clients to this http server, rather than HostSystem.Name
-	Map.SessionManager().ServiceHostName = u.Host
+	ctx.sessionManager().ServiceHostName = u.Host
 
 	// Add vcsim config to OptionManager for use by SDK handlers (see lookup/simulator for example)
-	m := Map.OptionManager()
+	m := ctx.Map.OptionManager()
 	for i := range m.Setting {
 		setting := m.Setting[i].GetOptionValue()
 
@@ -714,7 +759,7 @@ func (s *Service) NewServer() *Server {
 
 	if s.RegisterEndpoints {
 		for i := range endpoints {
-			endpoints[i](s, Map)
+			endpoints[i](s, ctx.Map)
 		}
 	}
 
@@ -732,7 +777,7 @@ func (s *Service) NewServer() *Server {
 	if s.TLS != nil {
 		ts.TLS = s.TLS
 		ts.TLS.ClientAuth = tls.RequestClientCert // Used by SessionManager.LoginExtensionByCertificate
-		Map.SessionManager().TLSCert = func() string {
+		ctx.Map.SessionManager().TLSCert = func() string {
 			return base64.StdEncoding.EncodeToString(ts.TLS.Certificates[0].Certificate[0])
 		}
 		ts.StartTLS()
@@ -768,7 +813,7 @@ func (s *Server) CertificateFile() (string, error) {
 		return s.caFile, nil
 	}
 
-	f, err := ioutil.TempFile("", "vcsim-")
+	f, err := os.CreateTemp("", "vcsim-")
 	if err != nil {
 		return "", err
 	}
@@ -937,4 +982,20 @@ func UnmarshalBody(typeFunc func(string) (reflect.Type, bool), data []byte) (*Me
 	method.This = field.Interface().(types.ManagedObjectReference)
 
 	return method, nil
+}
+
+func newInvalidStateFault(format string, args ...any) *types.InvalidState {
+	msg := fmt.Sprintf(format, args...)
+	return &types.InvalidState{
+		VimFault: types.VimFault{
+			MethodFault: types.MethodFault{
+				FaultCause: &types.LocalizedMethodFault{
+					Fault: &types.SystemErrorFault{
+						Reason: msg,
+					},
+					LocalizedMessage: msg,
+				},
+			},
+		},
+	}
 }

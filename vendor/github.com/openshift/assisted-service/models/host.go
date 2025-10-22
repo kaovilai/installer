@@ -37,6 +37,9 @@ type Host struct {
 	// Format: uuid
 	ClusterID *strfmt.UUID `json:"cluster_id,omitempty" gorm:"foreignkey:Cluster"`
 
+	// Indicate that connection to assisted service was timed out when soft timeout is enabled.
+	ConnectionTimedOut bool `json:"connection_timed_out,omitempty"`
+
 	// connectivity
 	Connectivity string `json:"connectivity,omitempty" gorm:"type:text"`
 
@@ -62,6 +65,9 @@ type Host struct {
 
 	// The domain name resolution result.
 	DomainNameResolutions string `json:"domain_name_resolutions,omitempty" gorm:"type:text"`
+
+	// The host's BMC credentials that will be used in TNF.
+	FencingCredentials string `json:"fencing_credentials,omitempty" gorm:"type:text"`
 
 	// free addresses
 	FreeAddresses string `json:"free_addresses,omitempty" gorm:"type:text"`
@@ -113,14 +119,14 @@ type Host struct {
 	Kind *string `json:"kind"`
 
 	// logs collected at
-	// Format: datetime
+	// Format: date-time
 	LogsCollectedAt strfmt.DateTime `json:"logs_collected_at,omitempty" gorm:"type:timestamp with time zone"`
 
 	// The progress of log collection or empty if logs are not applicable
 	LogsInfo LogsState `json:"logs_info,omitempty" gorm:"type:varchar(2048)"`
 
 	// logs started at
-	// Format: datetime
+	// Format: date-time
 	LogsStartedAt strfmt.DateTime `json:"logs_started_at,omitempty" gorm:"type:timestamp with time zone"`
 
 	// machine config pool name
@@ -413,7 +419,7 @@ func (m *Host) validateLogsCollectedAt(formats strfmt.Registry) error {
 		return nil
 	}
 
-	if err := validate.FormatOf("logs_collected_at", "body", "datetime", m.LogsCollectedAt.String(), formats); err != nil {
+	if err := validate.FormatOf("logs_collected_at", "body", "date-time", m.LogsCollectedAt.String(), formats); err != nil {
 		return err
 	}
 
@@ -442,7 +448,7 @@ func (m *Host) validateLogsStartedAt(formats strfmt.Registry) error {
 		return nil
 	}
 
-	if err := validate.FormatOf("logs_started_at", "body", "datetime", m.LogsStartedAt.String(), formats); err != nil {
+	if err := validate.FormatOf("logs_started_at", "body", "date-time", m.LogsStartedAt.String(), formats); err != nil {
 		return err
 	}
 

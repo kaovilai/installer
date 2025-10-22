@@ -3,7 +3,6 @@ package azure
 
 import (
 	"fmt"
-	"sort"
 	"strings"
 
 	"github.com/pkg/errors"
@@ -11,6 +10,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	capz "sigs.k8s.io/cluster-api-provider-azure/api/v1beta1"
 
 	v1 "github.com/openshift/api/config/v1"
 	machinev1 "github.com/openshift/api/machine/v1"
@@ -26,7 +26,7 @@ const (
 )
 
 // Machines returns a list of machines for a machinepool.
-func Machines(clusterID string, config *types.InstallConfig, pool *types.MachinePool, osImage, role, userDataSecret string, capabilities map[string]string, useImageGallery bool) ([]machineapi.Machine, *machinev1.ControlPlaneMachineSet, error) {
+func Machines(clusterID string, config *types.InstallConfig, pool *types.MachinePool, osImage, role, userDataSecret string, capabilities map[string]string, useImageGallery bool, session *icazure.Session) ([]machineapi.Machine, *machinev1.ControlPlaneMachineSet, error) {
 	if configPlatform := config.Platform.Name(); configPlatform != azure.Name {
 		return nil, nil, fmt.Errorf("non-Azure configuration: %q", configPlatform)
 	}
@@ -54,7 +54,7 @@ func Machines(clusterID string, config *types.InstallConfig, pool *types.Machine
 		if len(azs) > 0 {
 			azIndex = int(idx) % len(azs)
 		}
-		provider, err := provider(platform, mpool, osImage, userDataSecret, clusterID, role, &azIndex, capabilities, useImageGallery)
+		provider, err := provider(platform, mpool, osImage, userDataSecret, clusterID, role, &azIndex, capabilities, useImageGallery, session)
 		if err != nil {
 			return nil, nil, errors.Wrap(err, "failed to create provider")
 		}
@@ -82,17 +82,23 @@ func Machines(clusterID string, config *types.InstallConfig, pool *types.Machine
 		*machineSetProvider = *provider
 		machines = append(machines, machine)
 	}
+
 	replicas := int32(total)
 	failureDomains := []machinev1.AzureFailureDomain{}
-	sort.Strings(mpool.Zones)
-	for _, zone := range mpool.Zones {
-		domain := machinev1.AzureFailureDomain{
-			Zone: zone,
-		}
 
-		failureDomains = append(failureDomains, domain)
+	if len(mpool.Zones) > 1 {
+		for _, zone := range mpool.Zones {
+			domain := machinev1.AzureFailureDomain{
+				Zone: zone,
+			}
+
+			failureDomains = append(failureDomains, domain)
+		}
+		machineSetProvider.Zone = ""
+	} else if len(mpool.Zones) == 1 {
+		machineSetProvider.Zone = mpool.Zones[0]
 	}
-	machineSetProvider.Zone = nil
+
 	controlPlaneMachineSet := &machinev1.ControlPlaneMachineSet{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: "machine.openshift.io/v1",
@@ -118,10 +124,6 @@ func Machines(clusterID string, config *types.InstallConfig, pool *types.Machine
 			Template: machinev1.ControlPlaneMachineSetTemplate{
 				MachineType: machinev1.OpenShiftMachineV1Beta1MachineType,
 				OpenShiftMachineV1Beta1Machine: &machinev1.OpenShiftMachineV1Beta1MachineTemplate{
-					FailureDomains: machinev1.FailureDomains{
-						Platform: v1.AzurePlatformType,
-						Azure:    &failureDomains,
-					},
 					ObjectMeta: machinev1.ControlPlaneMachineSetTemplateObjectMeta{
 						Labels: map[string]string{
 							"machine.openshift.io/cluster-api-cluster":      clusterID,
@@ -138,13 +140,21 @@ func Machines(clusterID string, config *types.InstallConfig, pool *types.Machine
 			},
 		},
 	}
+
+	if len(failureDomains) > 0 {
+		controlPlaneMachineSet.Spec.Template.OpenShiftMachineV1Beta1Machine.FailureDomains = &machinev1.FailureDomains{
+			Platform: v1.AzurePlatformType,
+			Azure:    &failureDomains,
+		}
+	}
+
 	return machines, controlPlaneMachineSet, nil
 }
 
-func provider(platform *azure.Platform, mpool *azure.MachinePool, osImage string, userDataSecret string, clusterID string, role string, azIdx *int, capabilities map[string]string, useImageGallery bool) (*machineapi.AzureMachineProviderSpec, error) {
-	var az *string
+func provider(platform *azure.Platform, mpool *azure.MachinePool, osImage string, userDataSecret string, clusterID string, role string, azIdx *int, capabilities map[string]string, useImageGallery bool, session *icazure.Session) (*machineapi.AzureMachineProviderSpec, error) {
+	var az string
 	if len(mpool.Zones) > 0 && azIdx != nil {
-		az = &mpool.Zones[*azIdx]
+		az = mpool.Zones[*azIdx]
 	}
 
 	hyperVGen, err := icazure.GetHyperVGenerationVersion(capabilities, "")
@@ -165,13 +175,16 @@ func provider(platform *azure.Platform, mpool *azure.MachinePool, osImage string
 	var image machineapi.Image
 	if mpool.OSImage.Publisher != "" {
 		image.Type = machineapi.AzureImageTypeMarketplaceWithPlan
+		if mpool.OSImage.Plan == azure.ImageNoPurchasePlan {
+			image.Type = machineapi.AzureImageTypeMarketplaceNoPlan
+		}
 		image.Publisher = mpool.OSImage.Publisher
 		image.Offer = mpool.OSImage.Offer
 		image.SKU = mpool.OSImage.SKU
 		image.Version = mpool.OSImage.Version
 	} else if useImageGallery {
 		// image gallery names cannot have dashes
-		galleryName := strings.Replace(clusterID, "-", "_", -1)
+		galleryName := strings.ReplaceAll(clusterID, "-", "_")
 		id := clusterID
 		if hyperVGen == "V2" {
 			id += "-gen2"
@@ -200,9 +213,12 @@ func provider(platform *azure.Platform, mpool *azure.MachinePool, osImage string
 		publicLB = ""
 	}
 
-	managedIdentity := fmt.Sprintf("%s-identity", clusterID)
-	if platform.IsARO() || platform.CloudName == azure.StackCloud {
-		managedIdentity = ""
+	managedIdentity := ""
+	if len(mpool.Identity.UserAssignedIdentities) > 0 {
+		managedIdentity = mpool.Identity.UserAssignedIdentities[0].ProviderID()
+	} else if mpool.Identity.Type == capz.VMIdentityUserAssigned {
+		// In this case, the installer will create the user-assigned identity.
+		managedIdentity = fmt.Sprintf("%s-identity", clusterID)
 	}
 
 	var diskEncryptionSet *machineapi.DiskEncryptionSetParameters
@@ -212,14 +228,49 @@ func provider(platform *azure.Platform, mpool *azure.MachinePool, osImage string
 		}
 	}
 
-	var securityProfile *machineapi.SecurityProfile
-	if mpool.EncryptionAtHost {
-		securityProfile = &machineapi.SecurityProfile{
-			EncryptionAtHost: &mpool.EncryptionAtHost,
+	var diskSecurityProfile machineapi.VMDiskSecurityProfile
+	if mpool.OSDisk.SecurityProfile != nil && mpool.OSDisk.SecurityProfile.SecurityEncryptionType != "" {
+		diskSecurityProfile = machineapi.VMDiskSecurityProfile{
+			SecurityEncryptionType: machineapi.SecurityEncryptionTypes(mpool.OSDisk.SecurityProfile.SecurityEncryptionType),
+		}
+
+		if mpool.OSDisk.SecurityProfile.DiskEncryptionSet != nil {
+			diskSecurityProfile.DiskEncryptionSet = machineapi.DiskEncryptionSetParameters{
+				ID: mpool.OSDisk.SecurityProfile.DiskEncryptionSet.ToID(),
+			}
 		}
 	}
 
+	securityProfile := generateSecurityProfile(mpool)
+
 	ultraSSDCapability := machineapi.AzureUltraSSDCapabilityState(mpool.UltraSSDCapability)
+
+	dataDisks := make([]machineapi.DataDisk, 0, len(mpool.DataDisks))
+
+	for _, disk := range mpool.DataDisks {
+		dataDisk := machineapi.DataDisk{
+			NameSuffix:     disk.NameSuffix,
+			DiskSizeGB:     disk.DiskSizeGB,
+			CachingType:    machineapi.CachingTypeOption(disk.CachingType),
+			DeletionPolicy: machineapi.DiskDeletionPolicyTypeDelete,
+		}
+
+		if disk.Lun != nil {
+			dataDisk.Lun = *disk.Lun
+		}
+
+		if disk.ManagedDisk != nil {
+			dataDisk.ManagedDisk = machineapi.DataDiskManagedDiskParameters{
+				StorageAccountType: machineapi.StorageAccountType(disk.ManagedDisk.StorageAccountType),
+			}
+
+			if disk.ManagedDisk.DiskEncryptionSet != nil {
+				dataDisk.ManagedDisk.DiskEncryptionSet = (*machineapi.DiskEncryptionSetParameters)(disk.ManagedDisk.SecurityProfile.DiskEncryptionSet)
+			}
+		}
+
+		dataDisks = append(dataDisks, dataDisk)
+	}
 
 	spec := &machineapi.AzureMachineProviderSpec{
 		TypeMeta: metav1.TypeMeta{
@@ -237,6 +288,7 @@ func provider(platform *azure.Platform, mpool *azure.MachinePool, osImage string
 			ManagedDisk: machineapi.OSDiskManagedDiskParameters{
 				StorageAccountType: mpool.OSDisk.DiskType,
 				DiskEncryptionSet:  diskEncryptionSet,
+				SecurityProfile:    diskSecurityProfile,
 			},
 		},
 		SecurityProfile:       securityProfile,
@@ -250,13 +302,47 @@ func provider(platform *azure.Platform, mpool *azure.MachinePool, osImage string
 		PublicLoadBalancer:    publicLB,
 		AcceleratedNetworking: getVMNetworkingType(mpool.VMNetworkingType),
 		Tags:                  platform.UserTags,
+		DataDisks:             dataDisks,
+	}
+	var bootDiagnostics *machineapi.AzureDiagnostics
+	if platform.DefaultMachinePlatform != nil {
+		bootDiagnostics = getBootDiagnosticObject(platform.DefaultMachinePlatform.BootDiagnostics, session.Environment.StorageEndpointSuffix, role)
+	}
+	tempDiagnostics := getBootDiagnosticObject(mpool.BootDiagnostics, session.Environment.StorageEndpointSuffix, role)
+	if tempDiagnostics != nil {
+		bootDiagnostics = tempDiagnostics
+	}
+	if bootDiagnostics != nil {
+		spec.Diagnostics.Boot = bootDiagnostics.Boot
 	}
 
 	if platform.CloudName == azure.StackCloud {
-		spec.AvailabilitySet = fmt.Sprintf("%s-cluster", clusterID)
+		spec.AvailabilitySet = fmt.Sprintf("%s_control-plane-as", clusterID)
 	}
 
 	return spec, nil
+}
+
+func getBootDiagnosticObject(diag *azure.BootDiagnostics, cloudName string, role string) *machineapi.AzureDiagnostics {
+	if diag == nil {
+		if role == "master" {
+			return &machineapi.AzureDiagnostics{Boot: &machineapi.AzureBootDiagnostics{StorageAccountType: machineapi.AzureManagedAzureDiagnosticsStorage}}
+		}
+		return nil
+	}
+	if diag.Type == capz.DisabledDiagnosticsStorage {
+		return nil
+	}
+	bootDiagnostics := &machineapi.AzureDiagnostics{Boot: &machineapi.AzureBootDiagnostics{}}
+	if diag.Type == capz.ManagedDiagnosticsStorage {
+		bootDiagnostics.Boot.StorageAccountType = machineapi.AzureManagedAzureDiagnosticsStorage
+	} else {
+		bootDiagnostics.Boot.StorageAccountType = machineapi.CustomerManagedAzureDiagnosticsStorage
+		bootDiagnostics.Boot.CustomerManaged = &machineapi.AzureCustomerManagedBootDiagnostics{
+			StorageAccountURI: bootDiagStorageURIBuilder(diag, cloudName),
+		}
+	}
+	return bootDiagnostics
 }
 
 // ConfigMasters sets the PublicIP flag and assigns a set of load balancers to the given machines
@@ -276,15 +362,16 @@ func ConfigMasters(machines []machineapi.Machine, controlPlane *machinev1.Contro
 }
 
 func getNetworkInfo(platform *azure.Platform, clusterID, role string) (string, string, string, error) {
+	networkResourceGroupName := platform.NetworkResourceGroupName
 	if platform.VirtualNetwork == "" {
-		return platform.ClusterResourceGroupName(clusterID), fmt.Sprintf("%s-vnet", clusterID), fmt.Sprintf("%s-%s-subnet", clusterID, role), nil
+		networkResourceGroupName = platform.ClusterResourceGroupName(clusterID)
 	}
 
 	switch role {
 	case "worker":
-		return platform.NetworkResourceGroupName, platform.VirtualNetwork, platform.ComputeSubnet, nil
+		return networkResourceGroupName, platform.VirtualNetworkName(clusterID), platform.ComputeSubnetName(clusterID), nil
 	case "master":
-		return platform.NetworkResourceGroupName, platform.VirtualNetwork, platform.ControlPlaneSubnet, nil
+		return networkResourceGroupName, platform.VirtualNetworkName(clusterID), platform.ControlPlaneSubnetName(clusterID), nil
 	default:
 		return "", "", "", fmt.Errorf("unrecognized machine role %s", role)
 	}
@@ -293,4 +380,49 @@ func getNetworkInfo(platform *azure.Platform, clusterID, role string) (string, s
 // getVMNetworkingType should set the correct capability for instance type
 func getVMNetworkingType(value string) bool {
 	return value == string(azure.VMnetworkingTypeAccelerated)
+}
+
+func generateSecurityProfile(mpool *azure.MachinePool) *machineapi.SecurityProfile {
+	securityProfile := &machineapi.SecurityProfile{}
+
+	if mpool.EncryptionAtHost {
+		securityProfile.EncryptionAtHost = &mpool.EncryptionAtHost
+	}
+
+	if mpool.Settings != nil && mpool.Settings.SecurityType != "" {
+		securityProfile.Settings = machineapi.SecuritySettings{
+			SecurityType: machineapi.SecurityTypes(mpool.Settings.SecurityType),
+		}
+
+		var uefiSettings machineapi.UEFISettings
+		if securityProfile.Settings.SecurityType == machineapi.SecurityTypesTrustedLaunch {
+			if mpool.Settings.TrustedLaunch != nil && mpool.Settings.TrustedLaunch.UEFISettings != nil {
+				if sb := mpool.Settings.TrustedLaunch.UEFISettings.SecureBoot; sb != nil {
+					uefiSettings.SecureBoot = machineapi.SecureBootPolicy(*sb)
+				}
+				if vtpm := mpool.Settings.TrustedLaunch.UEFISettings.VirtualizedTrustedPlatformModule; vtpm != nil {
+					uefiSettings.VirtualizedTrustedPlatformModule = machineapi.VirtualizedTrustedPlatformModulePolicy(*vtpm)
+				}
+
+				securityProfile.Settings.TrustedLaunch = &machineapi.TrustedLaunch{
+					UEFISettings: uefiSettings,
+				}
+			}
+		} else if securityProfile.Settings.SecurityType == machineapi.SecurityTypesConfidentialVM {
+			if mpool.Settings.ConfidentialVM != nil && mpool.Settings.ConfidentialVM.UEFISettings != nil {
+				if sb := mpool.Settings.ConfidentialVM.UEFISettings.SecureBoot; sb != nil {
+					uefiSettings.SecureBoot = machineapi.SecureBootPolicy(*sb)
+				}
+				if vtpm := mpool.Settings.ConfidentialVM.UEFISettings.VirtualizedTrustedPlatformModule; vtpm != nil {
+					uefiSettings.VirtualizedTrustedPlatformModule = machineapi.VirtualizedTrustedPlatformModulePolicy(*vtpm)
+				}
+
+				securityProfile.Settings.ConfidentialVM = &machineapi.ConfidentialVM{
+					UEFISettings: uefiSettings,
+				}
+			}
+		}
+	}
+
+	return securityProfile
 }

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/coreos/stream-metadata-go/stream"
 	"github.com/hashicorp/go-version"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
@@ -19,6 +20,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/apimachinery/pkg/util/wait"
 
+	"github.com/openshift/installer/pkg/rhcos"
 	"github.com/openshift/installer/pkg/types"
 	"github.com/openshift/installer/pkg/types/vsphere"
 	"github.com/openshift/installer/pkg/types/vsphere/validation"
@@ -36,12 +38,6 @@ type TagManager interface {
 	GetAttachedTagsOnObjects(ctx context.Context, objectID []mo.Reference) ([]vapitags.AttachedTags, error)
 }
 
-const (
-	esxi7U2BuildNumber    int    = 17630552
-	vcenter7U2BuildNumber int    = 17694817
-	vcenter7U2Version     string = "7.0.2"
-)
-
 var localLogger = logrus.New()
 
 type validationContext struct {
@@ -51,6 +47,7 @@ type validationContext struct {
 	TagManager          TagManager
 	regionTagCategoryID string
 	zoneTagCategoryID   string
+	rhcosStream         *stream.Stream
 }
 
 // Validate executes platform-specific validation.
@@ -124,6 +121,12 @@ func ValidateForProvisioning(ic *types.InstallConfig) error {
 				return err
 			}
 			defer cleanup()
+
+			err = getRhcosStream(validationCtx)
+			if err != nil {
+				return err
+			}
+
 			allErrs = append(allErrs, validateVCenterVersion(validationCtx, field.NewPath("platform").Child("vsphere").Child("vcenters"))...)
 			clients[failureDomain.Server] = validationCtx
 		}
@@ -146,15 +149,24 @@ func validateFailureDomain(validationCtx *validationContext, failureDomain *vsph
 	}
 
 	vsphereField := field.NewPath("platform").Child("vsphere")
-	topologyField := vsphereField.Child("failureDomains").Child("topology")
+	failureDomainField := vsphereField.Child("failureDomains")
+	topologyField := failureDomainField.Child("topology")
 
 	if checkTags {
 		regionTagCategoryID, zoneTagCategoryID, err := validateTagCategories(validationCtx)
 		if err != nil {
 			allErrs = append(allErrs, field.InternalError(vsphereField, err))
 		}
+
 		validationCtx.regionTagCategoryID = regionTagCategoryID
 		validationCtx.zoneTagCategoryID = zoneTagCategoryID
+		if failureDomain.ZoneType == vsphere.HostGroupFailureDomain {
+			allErrs = append(allErrs, validateTagAttachments(validationCtx, clusterComputeResource, failureDomain.Topology.ComputeCluster, region, failureDomain.Zone, topologyField.Child("computeCluster"))...)
+			allErrs = append(allErrs, validateTagAttachments(validationCtx, hostSystem, failureDomain.Topology.ComputeCluster, zone, failureDomain.Zone, topologyField.Child("hostGroup"))...)
+		} else {
+			allErrs = append(allErrs, validateTagAttachments(validationCtx, datacenter, failureDomain.Topology.Datacenter, region, failureDomain.Zone, topologyField.Child("datacenter"))...)
+			allErrs = append(allErrs, validateTagAttachments(validationCtx, clusterComputeResource, failureDomain.Topology.ComputeCluster, zone, failureDomain.Zone, topologyField.Child("computeCluster"))...)
+		}
 	}
 
 	allErrs = append(allErrs, resourcePoolExists(validationCtx, resourcePool, topologyField.Child("resourcePool"))...)
@@ -164,11 +176,19 @@ func validateFailureDomain(validationCtx *validationContext, failureDomain *vsph
 		checkDatacenterPrivileges = false
 	}
 
+	if failureDomain.ZoneType == vsphere.HostGroupFailureDomain {
+		allErrs = append(allErrs, validateHostGroups(validationCtx, failureDomain.Topology.ComputeCluster, failureDomain.Topology.HostGroup, topologyField.Child("hostGroup"))...)
+	}
+
 	allErrs = append(allErrs, validateESXiVersion(validationCtx, failureDomain.Topology.ComputeCluster, vsphereField, topologyField.Child("computeCluster"))...)
 	allErrs = append(allErrs, validateVcenterPrivileges(validationCtx, topologyField.Child("server"))...)
 	allErrs = append(allErrs, computeClusterExists(validationCtx, failureDomain.Topology.ComputeCluster, topologyField.Child("computeCluster"), checkComputeClusterPrivileges, checkTags)...)
 	allErrs = append(allErrs, datacenterExists(validationCtx, failureDomain.Topology.Datacenter, topologyField.Child("datacenter"), checkDatacenterPrivileges)...)
 	allErrs = append(allErrs, datastoreExists(validationCtx, failureDomain.Topology.Datacenter, failureDomain.Topology.Datastore, topologyField.Child("datastore"))...)
+
+	if failureDomain.Topology.Template != "" {
+		allErrs = append(allErrs, validateTemplate(validationCtx, failureDomain.Topology.Template, topologyField.Child("template"))...)
+	}
 
 	for _, network := range failureDomain.Topology.Networks {
 		allErrs = append(allErrs, validateNetwork(validationCtx, failureDomain.Topology.Datacenter, failureDomain.Topology.ComputeCluster, network, topologyField)...)
@@ -177,35 +197,78 @@ func validateFailureDomain(validationCtx *validationContext, failureDomain *vsph
 	return allErrs
 }
 
-// folderExists returns an error if a folder is specified in the vSphere platform but a folder with that name is not found in the datacenter.
-func folderExists(validationCtx *validationContext, folderPath string, fldPath *field.Path) field.ErrorList {
+func validateHostGroups(validationCtx *validationContext, cluster, hostGroup string, fldPath *field.Path) field.ErrorList {
 	allErrs := field.ErrorList{}
-	finder := validationCtx.Finder
-	// If no folder is specified, skip this check as the folder will be created.
-	if folderPath == "" {
-		return allErrs
-	}
-
 	ctx, cancel := context.WithTimeout(context.TODO(), 60*time.Second)
 	defer cancel()
 
-	folder, err := finder.Folder(ctx, folderPath)
+	ccr, err := validationCtx.Finder.ClusterComputeResource(ctx, cluster)
 	if err != nil {
-		return append(allErrs, field.Invalid(fldPath, folderPath, err.Error()))
+		allErrs = append(allErrs, field.InternalError(fldPath, err))
 	}
-	permissionGroup := permissions[permissionFolder]
 
-	err = comparePrivileges(ctx, validationCtx, folder.Reference(), permissionGroup)
+	configInfoEx, err := ccr.Configuration(ctx)
 	if err != nil {
-		return append(allErrs, field.InternalError(fldPath, err))
+		allErrs = append(allErrs, field.InternalError(fldPath, err))
 	}
-	return allErrs
+
+	for _, g := range configInfoEx.Group {
+		if hg, ok := g.(*vim25types.ClusterHostGroup); ok {
+			if hg.Name == hostGroup {
+				return nil
+			}
+		}
+	}
+
+	// this was originally missed
+	// if we reach here there are no vm-host groups by the name specified
+	// we need to add an error
+
+	return append(allErrs, field.NotFound(fldPath, hostGroup))
 }
+
+/* Support Scenario Notes
+ * <7 not supported - validation fail
+ * <7.0.2 not supported because of CSI drivers - validation fail
+ * >= 7.0.2 <8 - eol warning only - validation pass
+ * >=8 - validation pass
+ * https://knowledge.broadcom.com/external/article/326316/build-numbers-and-versions-of-vmware-vce.html
+ * https://knowledge.broadcom.com/external/article/314608/correlating-vmware-cloud-foundation-vers.html
+ */
+
+const (
+	eolVSphereVersion int = 7
+
+	// csi driver requirement.
+	minimumVCenterBuild    int = 17694817
+	minimumEsxiBuildNumber int = 17630552
+
+	supportedVSphereVersion int = 8
+
+	// GA build of vCenter 8, there are no constraints with csi.
+	supportedVCenterBuild    int = 20519528
+	supportedEsxiBuildNumber int = 20513097
+
+	vSphereCsiMinimumVersion string = "7.0.2"
+)
 
 func validateVCenterVersion(validationCtx *validationContext, fldPath *field.Path) field.ErrorList {
 	allErrs := field.ErrorList{}
 
-	constraints, err := version.NewConstraint(fmt.Sprintf("< %s", vcenter7U2Version))
+	// constraints
+	// CSI version constraint
+	csiConstraint, err := version.NewConstraint(fmt.Sprintf(">= %d, < %s", eolVSphereVersion, vSphereCsiMinimumVersion))
+	if err != nil {
+		allErrs = append(allErrs, field.InternalError(fldPath, err))
+	}
+
+	eolConstraints, err := version.NewConstraint(fmt.Sprintf(">= %d, < %d", eolVSphereVersion, supportedVSphereVersion))
+	if err != nil {
+		allErrs = append(allErrs, field.InternalError(fldPath, err))
+	}
+
+	// We support vSphere 8 and VVF/VCF 9
+	supportedConstraints, err := version.NewConstraint(fmt.Sprintf(">= %d", supportedVSphereVersion))
 	if err != nil {
 		allErrs = append(allErrs, field.InternalError(fldPath, err))
 	}
@@ -214,6 +277,8 @@ func validateVCenterVersion(validationCtx *validationContext, fldPath *field.Pat
 	if err != nil {
 		allErrs = append(allErrs, field.InternalError(fldPath, err))
 	}
+
+	// Current vCenter Build number
 	build, err := strconv.Atoi(validationCtx.Client.ServiceContent.About.Build)
 	if err != nil {
 		allErrs = append(allErrs, field.InternalError(fldPath, err))
@@ -222,9 +287,32 @@ func validateVCenterVersion(validationCtx *validationContext, fldPath *field.Pat
 	detail := fmt.Sprintf("The vSphere storage driver requires a minimum of vSphere 7 Update 2. Current vCenter version: %s, build: %s",
 		validationCtx.Client.ServiceContent.About.Version, validationCtx.Client.ServiceContent.About.Build)
 
-	if constraints.Check(vCenterVersion) {
+	switch {
+	// case: vCenter < 7.0.2
+	case csiConstraint.Check(vCenterVersion):
+		// case: < 7.0.2
+		logrus.Warnf("VMware vSphere 7 is end of service as of 10/2/2025. Current vCenter version: %s, build: %d", vCenterVersion.String(), build)
 		allErrs = append(allErrs, field.Required(fldPath, detail))
-	} else if build < vcenter7U2BuildNumber {
+	case eolConstraints.Check(vCenterVersion):
+		// case: >= 7.0.0 < 8.0.0
+		// While vSphere 7 is EOL we can't block installs because a customer could
+		// have an extended support and a support exception
+		logrus.Warnf("VMware vSphere 7 is end of service as of 10/2/2025. Current vCenter version: %s, build: %d", vCenterVersion.String(), build)
+
+		// Still running vSphere 7 but wrong build to use CSI driver
+		if build < minimumVCenterBuild {
+			allErrs = append(allErrs, field.Required(fldPath, detail))
+		}
+	case supportedConstraints.Check(vCenterVersion):
+		// case: >= 8.0.0
+		// This is currently set to the GA build number, all of vSphere 8 is supported
+		if build < supportedVCenterBuild {
+			allErrs = append(allErrs, field.Required(fldPath, detail))
+		}
+	default:
+		// case: < 7.0.0
+		detail = fmt.Sprintf("Unsupported version of vSphere. Current vCenter version: %s, build: %s",
+			validationCtx.Client.ServiceContent.About.Version, validationCtx.Client.ServiceContent.About.Build)
 		allErrs = append(allErrs, field.Required(fldPath, detail))
 	}
 
@@ -237,6 +325,22 @@ func validateESXiVersion(validationCtx *validationContext, clusterPath string, v
 
 	ctx, cancel := context.WithTimeout(context.TODO(), 60*time.Second)
 	defer cancel()
+
+	csiConstraint, err := version.NewConstraint(fmt.Sprintf(">= %d, < %s", eolVSphereVersion, vSphereCsiMinimumVersion))
+	if err != nil {
+		allErrs = append(allErrs, field.InternalError(vSphereFldPath, err))
+	}
+
+	eolConstraints, err := version.NewConstraint(fmt.Sprintf(">= %d, < %d", eolVSphereVersion, supportedVSphereVersion))
+	if err != nil {
+		allErrs = append(allErrs, field.InternalError(vSphereFldPath, err))
+	}
+
+	// We support vSphere 8 and VVF/VCF 9
+	supportedConstraints, err := version.NewConstraint(fmt.Sprintf(">= %d", supportedVSphereVersion))
+	if err != nil {
+		allErrs = append(allErrs, field.InternalError(vSphereFldPath, err))
+	}
 
 	clusters, err := finder.ClusterComputeResourceList(ctx, clusterPath)
 
@@ -258,11 +362,6 @@ func validateESXiVersion(validationCtx *validationContext, clusterPath string, v
 		}
 	}
 
-	v7, err := version.NewVersion("7.0")
-	if err != nil {
-		return append(allErrs, field.InternalError(vSphereFldPath, err))
-	}
-
 	hosts, err := clusters[0].Hosts(context.TODO())
 	if err != nil {
 		err = errors.Wrapf(err, "unable to find hosts from cluster on path: %s", clusterPath)
@@ -270,30 +369,59 @@ func validateESXiVersion(validationCtx *validationContext, clusterPath string, v
 	}
 
 	for _, h := range hosts {
+		var esxiHostVersion *version.Version
 		var mh mo.HostSystem
-		err := h.Properties(context.TODO(), h.Reference(), []string{"config.product"}, &mh)
+		err := h.Properties(context.TODO(), h.Reference(), []string{"config.product", "runtime"}, &mh)
 		if err != nil {
 			return append(allErrs, field.InternalError(vSphereFldPath, err))
 		}
 
-		esxiHostVersion, err := version.NewVersion(mh.Config.Product.Version)
-		if err != nil {
-			return append(allErrs, field.InternalError(vSphereFldPath, err))
+		if mh.Runtime.InMaintenanceMode || mh.Runtime.ConnectionState == vim25types.HostSystemConnectionStateDisconnected || mh.Runtime.ConnectionState == vim25types.HostSystemConnectionStateNotResponding {
+			continue
+		}
+
+		if mh.Config != nil {
+			esxiHostVersion, err = version.NewVersion(mh.Config.Product.Version)
+			if err != nil {
+				return append(allErrs, field.InternalError(vSphereFldPath, err))
+			}
+		} else {
+			return append(allErrs, field.InternalError(vSphereFldPath, errors.Errorf("vCenter is failing to retrieve config product version information for the ESXi host: %s", h.Name())))
 		}
 
 		detail := fmt.Sprintf("The vSphere storage driver requires a minimum of vSphere 7 Update 2. The ESXi host: %s is version: %s and build: %s",
 			h.Name(), mh.Config.Product.Version, mh.Config.Product.Build)
 
-		if esxiHostVersion.LessThan(v7) {
-			allErrs = append(allErrs, field.Required(computeClusterFldPath, detail))
-		} else {
-			build, err := strconv.Atoi(mh.Config.Product.Build)
-			if err != nil {
-				return append(allErrs, field.InternalError(vSphereFldPath, err))
+		build, err := strconv.Atoi(mh.Config.Product.Build)
+		if err != nil {
+			return append(allErrs, field.InternalError(vSphereFldPath, err))
+		}
+
+		switch {
+		// case: vCenter < 7.0.2
+		case csiConstraint.Check(esxiHostVersion):
+			// case: < 7.0.2
+			logrus.Warnf("VMware vSphere 7 is end of service as of 10/2/2025. The ESXi host: %s is version: %s and build: %s",
+				h.Name(), mh.Config.Product.Version, mh.Config.Product.Build)
+			allErrs = append(allErrs, field.Required(vSphereFldPath, detail))
+		case eolConstraints.Check(esxiHostVersion):
+			logrus.Warnf("VMware vSphere 7 is end of service as of 10/2/2025. The ESXi host: %s is version: %s and build: %s",
+				h.Name(), mh.Config.Product.Version, mh.Config.Product.Build)
+			// Still running vSphere 7 but wrong build to use CSI driver
+			if build < minimumEsxiBuildNumber {
+				allErrs = append(allErrs, field.Required(vSphereFldPath, detail))
 			}
-			if build < esxi7U2BuildNumber {
-				allErrs = append(allErrs, field.Required(computeClusterFldPath, detail))
+		case supportedConstraints.Check(esxiHostVersion):
+			// case: >= 8.0.0
+			// This is currently set to the GA build number, all of vSphere 8 is supported
+			if build < supportedEsxiBuildNumber {
+				allErrs = append(allErrs, field.Required(vSphereFldPath, detail))
 			}
+		default:
+			// case: < 7.0.0
+			detail = fmt.Sprintf("Unsupported version of vSphere.  The ESXi host: %s is version: %s and build: %s",
+				h.Name(), mh.Config.Product.Version, mh.Config.Product.Build)
+			allErrs = append(allErrs, field.Required(vSphereFldPath, detail))
 		}
 	}
 	return allErrs
@@ -352,13 +480,6 @@ func computeClusterExists(validationCtx *validationContext, computeCluster strin
 		permissionGroup := permissions[permissionCluster]
 		err = comparePrivileges(ctx, validationCtx, computeClusterMo.Reference(), permissionGroup)
 
-		if err != nil {
-			return field.ErrorList{field.InternalError(fldPath, err)}
-		}
-	}
-
-	if checkTagAttachment {
-		err = validateTagAttachment(validationCtx, computeClusterMo.Reference())
 		if err != nil {
 			return field.ErrorList{field.InternalError(fldPath, err)}
 		}
@@ -570,57 +691,198 @@ func validateTagCategories(validationCtx *validationContext) (string, string, er
 	return regionTagCategoryID, zoneTagCategoryID, nil
 }
 
-func validateTagAttachment(validationCtx *validationContext, reference vim25types.ManagedObjectReference) error {
-	if validationCtx.TagManager == nil {
-		return nil
-	}
-	client := validationCtx.Client
-	tagManager := validationCtx.TagManager
+type vsphereObjectType string
+
+const (
+	datacenter             vsphereObjectType = "Datacenter"
+	clusterComputeResource vsphereObjectType = "ClusterComputeResource"
+	hostSystem             vsphereObjectType = "HostSystem"
+)
+
+const (
+	region string = "region"
+	zone   string = "zone"
+)
+
+func validateTagAttachments(validationCtx *validationContext, objectType vsphereObjectType, objectPath, objectLocation, locationName string, fldPath *field.Path) field.ErrorList {
+	errList := field.ErrorList{}
+	var refs []mo.Reference
 	regionTagCategoryID := validationCtx.regionTagCategoryID
 	zoneTagCategoryID := validationCtx.zoneTagCategoryID
+	if validationCtx.TagManager == nil {
+		return append(errList, field.InternalError(fldPath, errors.New("Tag manager is unavailable")))
+	}
 	ctx, cancel := context.WithTimeout(context.TODO(), 60*time.Second)
 	defer cancel()
 
-	referencesToCheck := []mo.Reference{reference}
-	ancestors, err := mo.Ancestors(ctx,
-		client.RoundTripper,
-		client.ServiceContent.PropertyCollector,
-		reference)
+	switch objectType {
+	case datacenter:
+		obj, err := validationCtx.Finder.Datacenter(ctx, objectPath)
+		if err != nil {
+			return field.ErrorList{field.InternalError(fldPath, err)}
+		}
+		refs = append(refs, obj.Reference())
+	case clusterComputeResource:
+		obj, err := validationCtx.Finder.ClusterComputeResource(ctx, objectPath)
+		if err != nil {
+			return field.ErrorList{field.InternalError(fldPath, err)}
+		}
+		refs = append(refs, obj.Reference())
+	case hostSystem:
+		ccr, err := validationCtx.Finder.ClusterComputeResource(ctx, objectPath)
+		if err != nil {
+			errList = append(errList, field.Invalid(fldPath, objectPath, err.Error()))
+		}
+		if err != nil {
+			return field.ErrorList{field.InternalError(fldPath, err)}
+		}
+		hosts, err := ccr.Hosts(ctx)
+		if err != nil {
+			errList = append(errList, field.Invalid(fldPath, objectPath, err.Error()))
+		}
+
+		for _, o := range hosts {
+			refs = append(refs, o.Reference())
+		}
+	}
+	attachedTags, err := validationCtx.TagManager.GetAttachedTagsOnObjects(ctx, refs)
 	if err != nil {
-		return err
+		errList = append(errList, field.Invalid(fldPath, objectPath, err.Error()))
 	}
-	for _, ancestor := range ancestors {
-		referencesToCheck = append(referencesToCheck, ancestor.Reference())
-	}
-	attachedTags, err := tagManager.GetAttachedTagsOnObjects(ctx, referencesToCheck)
-	if err != nil {
-		return err
-	}
-	regionTagAttached := false
-	zoneTagAttached := false
-	for _, attachedTag := range attachedTags {
-		for _, tag := range attachedTag.Tags {
-			if !regionTagAttached {
-				if tag.CategoryID == regionTagCategoryID {
-					regionTagAttached = true
+
+	anyHostsTagged := false
+
+taggedHostFound:
+	for _, ta := range attachedTags {
+		if findReference(refs, ta.ObjectID) {
+			for _, tag := range ta.Tags {
+				switch objectLocation {
+				case region:
+					if tag.CategoryID == regionTagCategoryID {
+						return nil
+					}
+				case zone:
+					if tag.CategoryID == zoneTagCategoryID {
+						if objectType == hostSystem {
+							if tag.Name == locationName {
+								anyHostsTagged = true
+								// since we are getting all hosts from the defined cluster
+								// there will be hosts not defined in the failure domain being checked
+								// if there is a single host tagged we will continue
+								// this could be expanded to include the vm-host group of type HostSystem
+								// to confirm each is tagged
+								break taggedHostFound
+							}
+						} else {
+							return nil
+						}
+					}
 				}
-			}
-			if !zoneTagAttached {
-				if tag.CategoryID == zoneTagCategoryID {
-					zoneTagAttached = true
-				}
-			}
-			if regionTagAttached && zoneTagAttached {
-				return nil
 			}
 		}
 	}
-	var errs []string
-	if !regionTagAttached {
-		errs = append(errs, fmt.Sprintf("tag associated with tag category %s not attached to this resource or ancestor", vsphere.TagCategoryRegion))
+
+	if objectType != hostSystem {
+		tagCategory := vsphere.TagCategoryRegion
+		if objectLocation == zone {
+			tagCategory = vsphere.TagCategoryZone
+		}
+
+		errList = append(errList, field.Invalid(fldPath, tagCategory, errors.New("tag associated with tag category not attached to this resource or ancestor").Error()))
+	} else if !anyHostsTagged {
+		errList = append(errList, field.Invalid(fldPath, locationName, errors.New("no tagged attached to host in zone").Error()))
 	}
-	if !zoneTagAttached {
-		errs = append(errs, fmt.Sprintf("tag associated with tag category %s not attached to this resource or ancestor", vsphere.TagCategoryZone))
+
+	return errList
+}
+
+func findReference(refs []mo.Reference, ref mo.Reference) bool {
+	for _, r := range refs {
+		if r.Reference().Value == ref.Reference().Value {
+			return true
+		}
 	}
-	return errors.New(strings.Join(errs, ","))
+	return false
+}
+
+func validateTemplate(validationCtx *validationContext, template string, fldPath *field.Path) field.ErrorList {
+	ctx, cancel := context.WithTimeout(context.TODO(), 60*time.Second)
+	defer cancel()
+	var vmMo mo.VirtualMachine
+	var arch stream.Arch
+	var platformArtifacts stream.PlatformArtifacts
+	var ok bool
+
+	// Not using GetArchitectures() here to make it easier to test
+	if arch, ok = validationCtx.rhcosStream.Architectures["x86_64"]; !ok {
+		return field.ErrorList{field.InternalError(fldPath, errors.New("unable to find vmware rhcos artifacts"))}
+	}
+
+	if platformArtifacts, ok = arch.Artifacts["vmware"]; !ok {
+		return field.ErrorList{field.InternalError(fldPath, errors.New("unable to find vmware rhcos artifacts"))}
+	}
+	rhcosReleaseVersion := platformArtifacts.Release
+
+	vm, err := validationCtx.Finder.VirtualMachine(ctx, template)
+
+	if err != nil {
+		return field.ErrorList{field.Invalid(fldPath, template, errors.Wrapf(err, "unable to find template %s", template).Error())}
+	}
+	err = vm.Properties(ctx, vm.Reference(), nil, &vmMo)
+	if err != nil {
+		return field.ErrorList{field.InternalError(fldPath, err)}
+	}
+
+	if vmMo.Summary.Config.Product != nil {
+		templateProductVersion := vmMo.Summary.Config.Product.Version
+		if templateProductVersion == "" {
+			localLogger.Warnf("unable to determine RHCOS version of virtual machine: %s, installation may fail.", template)
+			return nil
+		}
+
+		err := compareCurrentToTemplate(templateProductVersion, rhcosReleaseVersion)
+		if err != nil {
+			return field.ErrorList{field.InternalError(fldPath, fmt.Errorf("current template: %s %w", template, err))}
+		}
+	} else {
+		localLogger.Warnf("unable to determine RHCOS version of virtual machine: %s, installation may fail.", template)
+	}
+
+	return nil
+}
+
+func compareCurrentToTemplate(templateProductVersion, rhcosStreamVersion string) error {
+	if templateProductVersion != rhcosStreamVersion {
+		templateVersion, err := strconv.Atoi(strings.Split(templateProductVersion, ".")[0])
+		if err != nil {
+			return err
+		}
+		currentRhcosVersion, err := strconv.Atoi(strings.Split(rhcosStreamVersion, ".")[0])
+		if err != nil {
+			return err
+		}
+
+		switch versionDiff := currentRhcosVersion - templateVersion; {
+		case versionDiff < 0:
+			return fmt.Errorf("rhcos version: %s is too many revisions ahead current version: %s", templateProductVersion, rhcosStreamVersion)
+		case versionDiff >= 2:
+			return fmt.Errorf("rhcos version: %s is too many revisions behind current version: %s", templateProductVersion, rhcosStreamVersion)
+		case versionDiff == 1:
+			localLogger.Warnf("rhcos version: %s is behind current version: %s, installation may fail", templateProductVersion, rhcosStreamVersion)
+		}
+	}
+	return nil
+}
+
+func getRhcosStream(validationCtx *validationContext) error {
+	var err error
+	ctx, cancel := context.WithTimeout(context.TODO(), 60*time.Second)
+	defer cancel()
+
+	validationCtx.rhcosStream, err = rhcos.FetchCoreOSBuild(ctx)
+
+	if err != nil {
+		return err
+	}
+	return nil
 }

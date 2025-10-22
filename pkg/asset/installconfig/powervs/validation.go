@@ -2,7 +2,10 @@ package powervs
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
+	"time"
 
 	"k8s.io/apimachinery/pkg/util/validation/field"
 
@@ -25,6 +28,15 @@ func Validate(config *types.InstallConfig) error {
 			fldPath := field.NewPath("compute").Index(idx)
 			allErrs = append(allErrs, validateMachinePool(fldPath, &compute)...)
 		}
+		// Machine pool CIDR check
+		for i := range config.Networking.MachineNetwork {
+			// Each machine pool CIDR must have 24 significant bits (/24)
+			if bits, _ := config.Networking.MachineNetwork[i].CIDR.Mask.Size(); bits != 24 {
+				// If not, create an error displaying the CIDR in the install config vs the expectation (/24)
+				fldPath := field.NewPath("networking")
+				allErrs = append(allErrs, field.Invalid(fldPath.Child("machineNetwork").Index(i).Child("cidr"), (&config.Networking.MachineNetwork[i].CIDR).String(), "Machine Pool CIDR must be /24."))
+			}
+		}
 	}
 	return allErrs.ToAggregate()
 }
@@ -35,6 +47,24 @@ func validateMachinePool(fldPath *field.Path, machinePool *types.MachinePool) fi
 		allErrs = append(allErrs, field.NotSupported(fldPath.Child("architecture"), machinePool.Architecture, []string{"ppc64le"}))
 	}
 	return allErrs
+}
+
+// ValidatePERAvailability ensures the target datacenter has PER enabled.
+func ValidatePERAvailability(client API, ic *types.InstallConfig) error {
+	capabilities, err := client.GetDatacenterCapabilities(context.TODO(), ic.PowerVS.Zone)
+	if err != nil {
+		return err
+	}
+	const per = "power-edge-router"
+	perAvail, ok := capabilities[per]
+	if !ok {
+		return fmt.Errorf("%s capability unknown at: %s", per, ic.PowerVS.Zone)
+	}
+	if !perAvail {
+		return fmt.Errorf("%s is not available at: %s", per, ic.PowerVS.Zone)
+	}
+
+	return nil
 }
 
 // ValidatePreExistingDNS ensures no pre-existing DNS record exists in the CIS
@@ -116,7 +146,7 @@ func validatePreExistingPrivateDNS(fldPath *field.Path, client API, ic *types.In
 func ValidateCustomVPCSetup(client API, ic *types.InstallConfig) error {
 	allErrs := field.ErrorList{}
 	var vpcRegion = ic.PowerVS.VPCRegion
-	var vpcName = ic.PowerVS.VPCName
+	var vpcName = ic.PowerVS.VPC
 	var err error
 	fldPath := field.NewPath("VPC")
 
@@ -141,45 +171,183 @@ func ValidateCustomVPCSetup(client API, ic *types.InstallConfig) error {
 	return allErrs.ToAggregate()
 }
 
-func findVPCInRegion(client API, name string, region string, path *field.Path) field.ErrorList {
+func findVPCInRegion(client API, vpcNameOrID string, region string, path *field.Path) field.ErrorList {
 	allErrs := field.ErrorList{}
 
-	if name == "" {
+	if vpcNameOrID == "" {
 		return allErrs
 	}
 
-	vpcs, err := client.GetVPCs(context.TODO(), region)
+	ctx, cancel := context.WithTimeout(context.TODO(), 5*time.Minute)
+	defer cancel()
+
+	vpcs, err := client.GetVPCs(ctx, region)
 	if err != nil {
 		return append(allErrs, field.InternalError(path.Child("vpcRegion"), err))
 	}
 
-	found := false
 	for _, vpc := range vpcs {
-		if *vpc.Name == name {
-			found = true
-			break
+		if *vpc.Name == vpcNameOrID || *vpc.ID == vpcNameOrID {
+			return allErrs
 		}
 	}
-	if !found {
-		allErrs = append(allErrs, field.NotFound(path.Child("vpcName"), name))
-	}
+
+	allErrs = append(allErrs, field.NotFound(path.Child("vpcName"), vpcNameOrID))
 
 	return allErrs
 }
 
-func findSubnetInVPC(client API, subnets []string, region string, name string, path *field.Path) field.ErrorList {
+func findSubnetInVPC(client API, subnets []string, region string, vpcNameOrID string, path *field.Path) field.ErrorList {
 	allErrs := field.ErrorList{}
 
 	if len(subnets) == 0 {
 		return allErrs
 	}
 
-	subnet, err := client.GetSubnetByName(context.TODO(), subnets[0], region)
+	ctx, cancel := context.WithTimeout(context.TODO(), 5*time.Minute)
+	defer cancel()
+
+	subnet, err := client.GetSubnetByName(ctx, subnets[0], region)
 	if err != nil {
 		allErrs = append(allErrs, field.InternalError(path.Child("vpcSubnets"), err))
-	} else if *subnet.VPC.Name != name {
+	} else {
+		if *subnet.VPC.Name == vpcNameOrID || *subnet.VPC.ID == vpcNameOrID {
+			return allErrs
+		}
 		allErrs = append(allErrs, field.Invalid(path.Child("vpcSubnets"), nil, "not attached to VPC"))
 	}
 
 	return allErrs
+}
+
+// ValidateResourceGroup validates the resource group in our install config.
+func ValidateResourceGroup(client API, ic *types.InstallConfig) error {
+	ctx, cancel := context.WithTimeout(context.TODO(), 5*time.Minute)
+	defer cancel()
+
+	resourceGroups, err := client.ListResourceGroups(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to list resourceGroups: %w", err)
+	}
+
+	switch ic.PowerVS.PowerVSResourceGroup {
+	case "":
+		return errors.New("platform:powervs:powervsresourcegroup is empty")
+	case "Default":
+		found := false
+		for _, resourceGroup := range resourceGroups.Resources {
+			if resourceGroup.Default != nil && *resourceGroup.Default {
+				found = true
+				ic.PowerVS.PowerVSResourceGroup = *resourceGroup.Name
+				break
+			}
+		}
+		if !found {
+			return errors.New("platform:powervs:powervsresourcegroup is default but no default exists")
+		}
+	default:
+		found := false
+		for _, resourceGroup := range resourceGroups.Resources {
+			if *resourceGroup.Name == ic.PowerVS.PowerVSResourceGroup {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return errors.New("platform:powervs:powervsresourcegroup has an invalid name")
+		}
+	}
+
+	return nil
+}
+
+// ValidateSystemTypeForZone checks if the specified sysType is available in the target zone.
+func ValidateSystemTypeForZone(client API, ic *types.InstallConfig) error {
+	var (
+		availableOnes []string
+		err           error
+	)
+
+	if ic.ControlPlane == nil || ic.ControlPlane.Platform.PowerVS == nil || ic.ControlPlane.Platform.PowerVS.SysType == "" {
+		return nil
+	}
+	availableOnes, err = client.GetDatacenterSupportedSystems(context.Background(), ic.PowerVS.Zone)
+	if err != nil {
+		// Fallback to hardcoded list
+		availableOnes, err = powervstypes.AvailableSysTypes(ic.PowerVS.Region, ic.PowerVS.Zone)
+		if err != nil {
+			return fmt.Errorf("failed to obtain available SysTypes for: %s", ic.PowerVS.Zone)
+		}
+	}
+	requested := ic.ControlPlane.Platform.PowerVS.SysType
+	found := false
+	for i := range availableOnes {
+		if requested == availableOnes[i] {
+			found = true
+			break
+		}
+	}
+	if found {
+		return nil
+	}
+	return fmt.Errorf("%s is not available in: %s, these are %v", requested, ic.PowerVS.Zone, availableOnes)
+}
+
+// ValidateServiceInstance validates the optional service instance GUID in our install config.
+func ValidateServiceInstance(client API, ic *types.InstallConfig) error {
+	ctx, cancel := context.WithTimeout(context.TODO(), 5*time.Minute)
+	defer cancel()
+
+	serviceInstances, err := client.ListServiceInstances(ctx)
+	if err != nil {
+		return err
+	}
+
+	switch ic.PowerVS.ServiceInstanceGUID {
+	case "":
+		return nil
+	default:
+		found := false
+		for _, serviceInstance := range serviceInstances {
+			guid := strings.SplitN(serviceInstance, " ", 2)[1]
+			if guid == ic.PowerVS.ServiceInstanceGUID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return errors.New("platform:powervs:serviceInstanceGUID has an invalid guid")
+		}
+	}
+
+	return nil
+}
+
+// ValidateTransitGateway validates the optional transit gateway name in our install config.
+func ValidateTransitGateway(client API, ic *types.InstallConfig) error {
+	var (
+		id  string
+		err error
+	)
+
+	ctx, cancel := context.WithTimeout(context.TODO(), 5*time.Minute)
+	defer cancel()
+
+	if len(ic.PowerVS.TransitGateway) > 0 {
+		// Is it a valid id?
+		err = client.TransitGatewayIDValid(ctx, ic.PowerVS.TransitGateway)
+		if err == nil {
+			return nil
+		}
+		// Is it a valid name?
+		id, err = client.TransitGatewayNameToID(ctx, ic.PowerVS.TransitGateway)
+		if err != nil {
+			return err
+		}
+		if id == "" {
+			return errors.New("platform:powervs:tgName has an invalid name")
+		}
+	}
+
+	return nil
 }

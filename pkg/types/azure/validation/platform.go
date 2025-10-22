@@ -39,6 +39,15 @@ var (
 
 	// tagKeyPrefixRegex is for verifying that the tag value does not contain restricted prefixes.
 	tagKeyPrefixRegex = regexp.MustCompile(`^(?i)(name$|kubernetes\.io|openshift\.io|microsoft|azure|windows)`)
+
+	// keyVaultNameRegex is for verifying the name of the key vault used for storage account encryption.
+	keyVaultNameRegex = regexp.MustCompile(`^[A-Za-z][0-9A-Za-z-]{1,22}[A-Za-z0-9]$`)
+
+	// keyVaultKeyNameRegex is for verifying the key name of the key vault used for storage account encryption.
+	keyVaultKeyNameRegex = regexp.MustCompile(`^[0-9A-Za-z-]{1,127}$`)
+
+	// keyVaultUserAssignedIdentityRegex is for verifying the user assigned identity key used for storage account encryption.
+	keyVaultUserAssignedIdentityRegex = regexp.MustCompile(`^[0-9A-Za-z][0-9A-Za-z-_]{2,127}$`)
 )
 
 // maxUserTagLimit is the maximum userTags that can be configured as defined in openshift/api.
@@ -46,18 +55,18 @@ var (
 const maxUserTagLimit = 10
 
 // ValidatePlatform checks that the specified platform is valid.
-func ValidatePlatform(p *azure.Platform, publish types.PublishingStrategy, fldPath *field.Path) field.ErrorList {
+func ValidatePlatform(p *azure.Platform, publish types.PublishingStrategy, fldPath *field.Path, ic *types.InstallConfig) field.ErrorList {
 	allErrs := field.ErrorList{}
 	if p.Region == "" {
 		allErrs = append(allErrs, field.Required(fldPath.Child("region"), "region should be set to one of the supported Azure regions"))
 	}
-	if !p.IsARO() && publish == types.ExternalPublishingStrategy {
+	if publish != types.InternalPublishingStrategy {
 		if p.BaseDomainResourceGroupName == "" {
 			allErrs = append(allErrs, field.Required(fldPath.Child("baseDomainResourceGroupName"), "baseDomainResourceGroupName is the resource group name where the azure dns zone is deployed"))
 		}
 	}
 	if p.DefaultMachinePlatform != nil {
-		allErrs = append(allErrs, ValidateMachinePool(p.DefaultMachinePlatform, "", p, fldPath.Child("defaultMachinePlatform"))...)
+		allErrs = append(allErrs, ValidateMachinePool(p.DefaultMachinePlatform, "", p, nil, fldPath.Child("defaultMachinePlatform"))...)
 	}
 	if p.VirtualNetwork != "" {
 		if p.ComputeSubnet == "" {
@@ -88,6 +97,16 @@ func ValidatePlatform(p *azure.Platform, publish types.PublishingStrategy, fldPa
 	if p.OutboundType == azure.UserDefinedRoutingOutboundType && p.VirtualNetwork == "" {
 		allErrs = append(allErrs, field.Invalid(fldPath.Child("outboundType"), p.OutboundType, fmt.Sprintf("%s is only allowed when installing to pre-existing network", azure.UserDefinedRoutingOutboundType)))
 	}
+	if p.OutboundType == azure.NATGatewaySingleZoneOutboundType {
+		if p.VirtualNetwork != "" {
+			// For now, BYO network and NAT gateways are not compatible
+			allErrs = append(allErrs, field.Invalid(fldPath.Child("outboundType"), p.OutboundType, fmt.Sprintf("%s is not allowed when installing to pre-existing network", p.OutboundType)))
+		}
+	}
+
+	if p.CustomerManagedKey != nil {
+		allErrs = append(allErrs, validateCustomerManagedKeys(p.CloudName, *p.CustomerManagedKey, fldPath.Child("customerManagedKey"))...)
+	}
 
 	// support for Azure user-defined tags made available through
 	// RFE-2017 is for AzurePublicCloud only.
@@ -107,6 +126,41 @@ func ValidatePlatform(p *azure.Platform, publish types.PublishingStrategy, fldPa
 		if p.ClusterOSImage != "" {
 			allErrs = append(allErrs, field.Required(fldPath.Child("clusterOSImage"), fmt.Sprintf("clusterOSImage must not be set when the cloud name is %s", cloud)))
 		}
+	}
+
+	return allErrs
+}
+
+// validateCustomerManagedKeys validates the key vault id.
+func validateCustomerManagedKeys(cloudName azure.CloudEnvironment, s azure.CustomerManagedKey, fldPath *field.Path) field.ErrorList {
+	var allErrs field.ErrorList
+
+	if cloudName == azure.StackCloud {
+		return append(allErrs, field.Invalid(fldPath, s.KeyVault.Name, "storage account encryption is not supported on this platform"))
+	}
+
+	if s.KeyVault.KeyName == "" {
+		allErrs = append(allErrs, field.Required(fldPath, "key vault key name is required for storage account encryption"))
+	} else if !keyVaultKeyNameRegex.MatchString(s.KeyVault.KeyName) {
+		allErrs = append(allErrs, field.Invalid(fldPath, s.KeyVault.KeyName, "invalid key name for encryption"))
+	}
+
+	if s.KeyVault.Name == "" {
+		allErrs = append(allErrs, field.Required(fldPath, "name of the key vault is required for storage account encryption"))
+	} else if !keyVaultNameRegex.MatchString(s.KeyVault.Name) || strings.Contains(s.KeyVault.Name, "--") {
+		allErrs = append(allErrs, field.Invalid(fldPath, s.KeyVault.Name, "invalid name for key vault for encryption"))
+	}
+
+	if s.KeyVault.ResourceGroup == "" {
+		allErrs = append(allErrs, field.Required(fldPath, "resource group of the key vault is required for storage account encryption"))
+	} else if !RxResourceGroup.MatchString(s.KeyVault.ResourceGroup) {
+		allErrs = append(allErrs, field.Invalid(fldPath, s.KeyVault.ResourceGroup, "invalid resource group for encryption"))
+	}
+
+	if s.UserAssignedIdentityKey == "" {
+		allErrs = append(allErrs, field.Required(fldPath, "user assigned identity key is required for storage account encryption"))
+	} else if !keyVaultUserAssignedIdentityRegex.MatchString(s.UserAssignedIdentityKey) {
+		allErrs = append(allErrs, field.Invalid(fldPath, s.UserAssignedIdentityKey, "invalid user assigned identity key for encryption"))
 	}
 
 	return allErrs
@@ -184,8 +238,9 @@ func findDuplicateTagKeys(tagSet map[string]string) error {
 
 var (
 	validOutboundTypes = map[azure.OutboundType]struct{}{
-		azure.LoadbalancerOutboundType:       {},
-		azure.UserDefinedRoutingOutboundType: {},
+		azure.LoadbalancerOutboundType:         {},
+		azure.NATGatewaySingleZoneOutboundType: {},
+		azure.UserDefinedRoutingOutboundType:   {},
 	}
 
 	validOutboundTypeValues = func() []string {
@@ -203,8 +258,8 @@ func validateAzureStack(p *azure.Platform, fldPath *field.Path) field.ErrorList 
 	if p.ARMEndpoint == "" {
 		allErrs = append(allErrs, field.Required(fldPath.Child("armEndpoint"), "ARM endpoint must be set when installing on Azure Stack"))
 	}
-	if p.OutboundType == azure.UserDefinedRoutingOutboundType {
-		allErrs = append(allErrs, field.Invalid(fldPath.Child("outboundType"), p.OutboundType, "Azure Stack does not support user-defined routing"))
+	if p.OutboundType != azure.LoadbalancerOutboundType {
+		allErrs = append(allErrs, field.Invalid(fldPath.Child("outboundType"), p.OutboundType, "Azure Stack does not support this routing currently"))
 	}
 	return allErrs
 }

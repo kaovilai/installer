@@ -1,14 +1,14 @@
 package powervs
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"net/http"
 	"regexp"
 	"time"
 
-	"github.com/IBM/go-sdk-core/v4/core"
-	"github.com/pkg/errors"
+	"github.com/IBM/go-sdk-core/v5/core"
 	"k8s.io/apimachinery/pkg/util/wait"
 )
 
@@ -20,13 +20,13 @@ const (
 func (o *ClusterUninstaller) listDNSRecords() (cloudResources, error) {
 	o.Logger.Debugf("Listing DNS records")
 
-	ctx, cancel := o.contextWithTimeout()
+	ctx, cancel := contextWithTimeout()
 	defer cancel()
 
 	select {
 	case <-ctx.Done():
 		o.Logger.Debugf("listDNSRecords: case <-ctx.Done()")
-		return nil, o.Context.Err() // we're cancelled, abort
+		return nil, ctx.Err() // we're cancelled, abort
 	default:
 	}
 
@@ -45,13 +45,13 @@ func (o *ClusterUninstaller) listDNSRecords() (cloudResources, error) {
 
 	dnsMatcher, err := regexp.Compile(fmt.Sprintf(`.*\Q%s.%s\E$`, o.ClusterName, o.BaseDomain))
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to build DNS records matcher")
+		return nil, fmt.Errorf("failed to build DNS records matcher: %w", err)
 	}
 
 	for moreData {
 		dnsResources, detailedResponse, err := o.dnsRecordsSvc.ListAllDnsRecordsWithContext(ctx, dnsRecordsOptions)
 		if err != nil {
-			return nil, errors.Wrapf(err, "failed to list DNS records: %v and the response is: %s", err, detailedResponse)
+			return nil, fmt.Errorf("failed to list DNS records: %w and the response is: %s", err, detailedResponse)
 		}
 
 		for _, record := range dnsResources.Result {
@@ -83,7 +83,7 @@ func (o *ClusterUninstaller) listDNSRecords() (cloudResources, error) {
 		for moreData {
 			dnsResources, detailedResponse, err := o.dnsRecordsSvc.ListAllDnsRecordsWithContext(ctx, dnsRecordsOptions)
 			if err != nil {
-				return nil, errors.Wrapf(err, "failed to list DNS records: %v and the response is: %s", err, detailedResponse)
+				return nil, fmt.Errorf("failed to list DNS records: %w and the response is: %s", err, detailedResponse)
 			}
 			for _, record := range dnsResources.Result {
 				o.Logger.Debugf("listDNSRecords: FOUND: DNS: %v, %v", *record.ID, *record.Name)
@@ -103,13 +103,13 @@ func (o *ClusterUninstaller) destroyDNSRecord(item cloudResource) error {
 		err      error
 	)
 
-	ctx, cancel := o.contextWithTimeout()
+	ctx, cancel := contextWithTimeout()
 	defer cancel()
 
 	select {
 	case <-ctx.Done():
 		o.Logger.Debugf("destroyDNSRecord: case <-ctx.Done()")
-		return o.Context.Err() // we're cancelled, abort
+		return ctx.Err() // we're cancelled, abort
 	default:
 	}
 
@@ -131,7 +131,7 @@ func (o *ClusterUninstaller) destroyDNSRecord(item cloudResource) error {
 
 	_, _, err = o.dnsRecordsSvc.DeleteDnsRecordWithContext(ctx, deleteOptions)
 	if err != nil {
-		return errors.Wrapf(err, "failed to delete DNS record %s", item.name)
+		return fmt.Errorf("failed to delete DNS record %s: %w", item.name, err)
 	}
 
 	o.Logger.Infof("Deleted DNS Record %q", item.name)
@@ -159,14 +159,14 @@ func (o *ClusterUninstaller) destroyDNSRecords() error {
 
 	items := o.insertPendingItems(cisDNSRecordTypeName, firstPassList.list())
 
-	ctx, cancel := o.contextWithTimeout()
+	ctx, cancel := contextWithTimeout()
 	defer cancel()
 
 	for _, item := range items {
 		select {
 		case <-ctx.Done():
 			o.Logger.Debugf("destroyDNSRecords: case <-ctx.Done()")
-			return o.Context.Err() // we're cancelled, abort
+			return ctx.Err() // we're cancelled, abort
 		default:
 		}
 
@@ -175,7 +175,7 @@ func (o *ClusterUninstaller) destroyDNSRecords() error {
 			Factor:   1.1,
 			Cap:      leftInContext(ctx),
 			Steps:    math.MaxInt32}
-		err = wait.ExponentialBackoffWithContext(ctx, backoff, func() (bool, error) {
+		err = wait.ExponentialBackoffWithContext(ctx, backoff, func(context.Context) (bool, error) {
 			err2 := o.destroyDNSRecord(item)
 			if err2 == nil {
 				return true, err2
@@ -192,7 +192,7 @@ func (o *ClusterUninstaller) destroyDNSRecords() error {
 		for _, item := range items {
 			o.Logger.Debugf("destroyDNSRecords: found %s in pending items", item.name)
 		}
-		return errors.Errorf("destroyDNSRecords: %d undeleted items pending", len(items))
+		return fmt.Errorf("destroyDNSRecords: %d undeleted items pending", len(items))
 	}
 
 	backoff := wait.Backoff{
@@ -200,7 +200,7 @@ func (o *ClusterUninstaller) destroyDNSRecords() error {
 		Factor:   1.1,
 		Cap:      leftInContext(ctx),
 		Steps:    math.MaxInt32}
-	err = wait.ExponentialBackoffWithContext(ctx, backoff, func() (bool, error) {
+	err = wait.ExponentialBackoffWithContext(ctx, backoff, func(context.Context) (bool, error) {
 		secondPassList, err2 := o.listDNSRecords()
 		if err2 != nil {
 			return false, err2

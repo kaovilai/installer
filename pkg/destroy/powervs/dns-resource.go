@@ -1,6 +1,7 @@
 package powervs
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"net/http"
@@ -8,9 +9,8 @@ import (
 	"time"
 
 	"github.com/IBM-Cloud/bluemix-go/crn"
-	"github.com/IBM/go-sdk-core/v4/core"
+	"github.com/IBM/go-sdk-core/v5/core"
 	"github.com/IBM/networking-go-sdk/resourcerecordsv1"
-	"github.com/pkg/errors"
 	"k8s.io/apimachinery/pkg/util/wait"
 )
 
@@ -22,13 +22,13 @@ const (
 func (o *ClusterUninstaller) listResourceRecords() (cloudResources, error) {
 	o.Logger.Debugf("Listing DNS resource records")
 
-	ctx, cancel := o.contextWithTimeout()
+	ctx, cancel := contextWithTimeout()
 	defer cancel()
 
 	select {
 	case <-ctx.Done():
 		o.Logger.Debugf("listResourceRecords: case <-ctx.Done()")
-		return nil, o.Context.Err() // we're cancelled, abort
+		return nil, ctx.Err() // we're cancelled, abort
 	default:
 	}
 
@@ -36,19 +36,19 @@ func (o *ClusterUninstaller) listResourceRecords() (cloudResources, error) {
 
 	dnsCRN, err := crn.Parse(o.DNSInstanceCRN)
 	if err != nil {
-		return nil, errors.Wrap(err, "Failed to parse DNSInstanceCRN")
+		return nil, fmt.Errorf("failed to parse DNSInstanceCRN: %w", err)
 	}
 	records, _, err := o.resourceRecordsSvc.ListResourceRecords(&resourcerecordsv1.ListResourceRecordsOptions{
 		InstanceID: &dnsCRN.ServiceInstance,
 		DnszoneID:  &o.dnsZoneID,
 	})
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to list resource records")
+		return nil, fmt.Errorf("failed to list resource records: %w", err)
 	}
 
 	dnsMatcher, err := regexp.Compile(fmt.Sprintf(`.*\Q%s.%s\E$`, o.ClusterName, o.BaseDomain))
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to build DNS records matcher")
+		return nil, fmt.Errorf("failed to build DNS records matcher: %w", err)
 	}
 
 	for _, record := range records.ResourceRecords {
@@ -66,7 +66,7 @@ func (o *ClusterUninstaller) listResourceRecords() (cloudResources, error) {
 		}
 	}
 	if err != nil {
-		return nil, errors.Wrap(err, "could not retrieve DNS records")
+		return nil, fmt.Errorf("could not retrieve DNS records: %w", err)
 	}
 	return cloudResources{}.insert(result...), nil
 }
@@ -78,22 +78,22 @@ func (o *ClusterUninstaller) destroyResourceRecord(item cloudResource) error {
 		err      error
 	)
 
-	ctx, cancel := o.contextWithTimeout()
+	ctx, cancel := contextWithTimeout()
 	defer cancel()
 
 	select {
 	case <-ctx.Done():
 		o.Logger.Debugf("destroyResourceRecord: case <-ctx.Done()")
-		return o.Context.Err() // we're cancelled, abort
+		return ctx.Err() // we're cancelled, abort
 	default:
 	}
 
 	if err != nil {
-		return errors.Wrapf(err, "failed to delete DNS Resource record %s", item.name)
+		return fmt.Errorf("failed to delete DNS Resource record %s: %w", item.name, err)
 	}
 	dnsCRN, err := crn.Parse(o.DNSInstanceCRN)
 	if err != nil {
-		return errors.Wrap(err, "Failed to parse DNSInstanceCRN")
+		return fmt.Errorf("failed to parse DNSInstanceCRN: %w", err)
 	}
 	getOptions := o.resourceRecordsSvc.NewGetResourceRecordOptions(dnsCRN.ServiceInstance, o.dnsZoneID, item.id)
 	_, response, err = o.resourceRecordsSvc.GetResourceRecord(getOptions)
@@ -113,7 +113,7 @@ func (o *ClusterUninstaller) destroyResourceRecord(item cloudResource) error {
 
 	_, err = o.resourceRecordsSvc.DeleteResourceRecord(deleteOptions)
 	if err != nil {
-		return errors.Wrapf(err, "failed to delete DNS Resource record %s", item.name)
+		return fmt.Errorf("failed to delete DNS Resource record %s: %w", item.name, err)
 	}
 
 	o.Logger.Infof("Deleted DNS Resource Record %q", item.name)
@@ -141,14 +141,14 @@ func (o *ClusterUninstaller) destroyResourceRecords() error {
 
 	items := o.insertPendingItems(ibmDNSRecordTypeName, firstPassList.list())
 
-	ctx, cancel := o.contextWithTimeout()
+	ctx, cancel := contextWithTimeout()
 	defer cancel()
 
 	for _, item := range items {
 		select {
 		case <-ctx.Done():
 			o.Logger.Debugf("destroyResourceRecords: case <-ctx.Done()")
-			return o.Context.Err() // we're cancelled, abort
+			return ctx.Err() // we're cancelled, abort
 		default:
 		}
 
@@ -157,7 +157,7 @@ func (o *ClusterUninstaller) destroyResourceRecords() error {
 			Factor:   1.1,
 			Cap:      leftInContext(ctx),
 			Steps:    math.MaxInt32}
-		err = wait.ExponentialBackoffWithContext(ctx, backoff, func() (bool, error) {
+		err = wait.ExponentialBackoffWithContext(ctx, backoff, func(context.Context) (bool, error) {
 			err2 := o.destroyResourceRecord(item)
 			if err2 == nil {
 				return true, err2
@@ -174,7 +174,7 @@ func (o *ClusterUninstaller) destroyResourceRecords() error {
 		for _, item := range items {
 			o.Logger.Debugf("destroyResourceRecords: found %s in pending items", item.name)
 		}
-		return errors.Errorf("destroyResourceRecords: %d undeleted items pending", len(items))
+		return fmt.Errorf("destroyResourceRecords: %d undeleted items pending", len(items))
 	}
 
 	backoff := wait.Backoff{
@@ -182,7 +182,7 @@ func (o *ClusterUninstaller) destroyResourceRecords() error {
 		Factor:   1.1,
 		Cap:      leftInContext(ctx),
 		Steps:    math.MaxInt32}
-	err = wait.ExponentialBackoffWithContext(ctx, backoff, func() (bool, error) {
+	err = wait.ExponentialBackoffWithContext(ctx, backoff, func(context.Context) (bool, error) {
 		secondPassList, err2 := o.listResourceRecords()
 		if err2 != nil {
 			return false, err2

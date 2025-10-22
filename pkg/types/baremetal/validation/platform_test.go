@@ -1,6 +1,7 @@
 package validation
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -51,6 +52,15 @@ func TestValidatePlatform(t *testing.T) {
 			expected: "bare metal hosts are missing",
 		},
 		{
+			name: "no_hosts_machineapi_disabled",
+			config: installConfig().
+				Capabilities(types.Capabilities{BaselineCapabilitySet: configv1.ClusterVersionCapabilitySetNone,
+					AdditionalEnabledCapabilities: []configv1.ClusterVersionCapability{configv1.ClusterVersionCapabilityIngress,
+						configv1.ClusterVersionCapabilityBaremetal}}).
+				BareMetalPlatform(
+					platform().Hosts()).build(),
+		},
+		{
 			name: "toofew_masters_norole",
 			config: installConfig().
 				BareMetalPlatform(
@@ -61,7 +71,7 @@ func TestValidatePlatform(t *testing.T) {
 					machinePool().Replicas(3)).
 				Compute(
 					machinePool().Replicas(1)).build(),
-			expected: "baremetal.Hosts: Required value: not enough hosts found \\(1\\) to support all the configured ControlPlane replicas \\(3\\)",
+			expected: "baremetal.hosts: Required value: not enough hosts found \\(1\\) to support all the configured ControlPlane replicas \\(3\\)",
 		},
 		{
 			name: "toofew_masters",
@@ -74,7 +84,7 @@ func TestValidatePlatform(t *testing.T) {
 					machinePool().Replicas(3)).
 				Compute(
 					machinePool().Replicas(1)).build(),
-			expected: "baremetal.Hosts: Required value: not enough hosts found \\(1\\) to support all the configured ControlPlane replicas \\(3\\)",
+			expected: "baremetal.hosts: Required value: not enough hosts found \\(1\\) to support all the configured ControlPlane replicas \\(3\\)",
 		},
 		{
 			name: "toofew_workers",
@@ -87,7 +97,7 @@ func TestValidatePlatform(t *testing.T) {
 					machinePool().Replicas(1)).
 				Compute(
 					machinePool().Replicas(3)).build(),
-			expected: "baremetal.Hosts: Required value: not enough hosts found \\(1\\) to support all the configured Compute replicas \\(3\\)",
+			expected: "baremetal.hosts: Required value: not enough hosts found \\(1\\) to support all the configured Compute replicas \\(3\\)",
 		},
 		{
 			name: "enough_hosts",
@@ -140,7 +150,7 @@ func TestValidatePlatform(t *testing.T) {
 					machinePool().Replicas(2)).
 				Compute(
 					machinePool().Replicas(2)).build(),
-			expected: "baremetal.Hosts: Required value: not enough hosts found \\(1\\) to support all the configured Compute replicas \\(2\\)",
+			expected: "baremetal.hosts: Required value: not enough hosts found \\(1\\) to support all the configured Compute replicas \\(2\\)",
 		},
 		{
 			name: "more_than_enough_hosts",
@@ -179,14 +189,7 @@ func TestValidatePlatform(t *testing.T) {
 					platform().Hosts(
 						host1().Name(""))).
 				ControlPlane(machinePool().Replicas(1)).build(),
-			expected: "baremetal.hosts\\[0\\].Name: Required value: missing Name",
-		},
-		{
-			name: "forbidden_feature_loadbalancer",
-			config: installConfig().
-				BareMetalPlatform(
-					platform().LoadBalancerType("OpenShiftManagedDefault")).build(),
-			expected: "baremetal.loadBalancer: Forbidden: load balancer is not supported in this feature set",
+			expected: "baremetal.hosts\\[0\\].name: Required value: missing Name",
 		},
 		{
 			name: "allowed_feature_loadbalancer_openshift_managed_default",
@@ -214,7 +217,7 @@ func TestValidatePlatform(t *testing.T) {
 			name: "missing_mac",
 			platform: platform().
 				Hosts(host1().BootMACAddress("")).build(),
-			expected: "baremetal.hosts\\[0\\].BootMACAddress: Required value: missing BootMACAddress",
+			expected: "baremetal.hosts\\[0\\].bootMACAddress: Required value: missing BootMACAddress",
 		},
 		{
 			name: "duplicate_host_name",
@@ -222,7 +225,7 @@ func TestValidatePlatform(t *testing.T) {
 				Hosts(
 					host1().Name("host1"),
 					host2().Name("host1")).build(),
-			expected: "baremetal.hosts\\[1\\].Name: Duplicate value: \"host1\"",
+			expected: "baremetal.hosts\\[1\\].name: Duplicate value: \"host1\"",
 		},
 		{
 			name: "valid_host_name",
@@ -240,19 +243,19 @@ func TestValidatePlatform(t *testing.T) {
 			name: "invalid_host_name_char",
 			platform: platform().
 				Hosts(host1().Name("test,example.com")).build(),
-			expected: "baremetal.Hosts\\[0\\].name: Invalid value: \"test,example.com\"",
+			expected: "baremetal.hosts\\[0\\].name: Invalid value: \"test,example.com\"",
 		},
 		{
 			name: "invalid_host_name_uppercase",
 			platform: platform().
 				Hosts(host1().Name("Host1")).build(),
-			expected: "baremetal.Hosts\\[0\\].name: Invalid value: \"Host1\"",
+			expected: "baremetal.hosts\\[0\\].name: Invalid value: \"Host1\"",
 		},
 		{
 			name: "invalid_host_name_length",
 			platform: platform().
 				Hosts(host1().Name(strings.Repeat("a", 300))).build(),
-			expected: "baremetal.Hosts\\[0\\].name: Invalid value: \"aaaaaaaaa",
+			expected: "baremetal.hosts\\[0\\].name: Invalid value: \"aaaaaaaaa",
 		},
 		{
 			name: "duplicate_host_mac",
@@ -260,13 +263,13 @@ func TestValidatePlatform(t *testing.T) {
 				Hosts(
 					host1().BootMACAddress("CA:FE:CA:FE:CA:FE"),
 					host2().BootMACAddress("CA:FE:CA:FE:CA:FE")).build(),
-			expected: "baremetal.hosts\\[1\\].BootMACAddress: Duplicate value: \"CA:FE:CA:FE:CA:FE\"",
+			expected: "baremetal.hosts\\[1\\].bootMACAddress: Duplicate value: \"CA:FE:CA:FE:CA:FE\"",
 		},
 		{
 			name: "invalid_boot_mode",
 			platform: platform().
 				Hosts(host1().BootMode("not-a-valid-value")).build(),
-			expected: "baremetal.Hosts\\[0\\].bootMode: Unsupported value: \"not-a-valid-value\": supported values: \"UEFI\", \"UEFISecureBoot\", \"legacy\"",
+			expected: "baremetal.hosts\\[0\\].bootMode: Unsupported value: \"not-a-valid-value\": supported values: \"UEFI\", \"UEFISecureBoot\", \"legacy\"",
 		},
 		{
 			name: "uefi_boot_mode",
@@ -284,7 +287,7 @@ func TestValidatePlatform(t *testing.T) {
 			name: "unsupported_uefi_secure_boot_mode",
 			platform: platform().
 				Hosts(host1().BootMode("UEFISecureBoot")).build(),
-			expected: "baremetal.Hosts\\[0\\].bootMode: Invalid value: \"UEFISecureBoot\": driver ipmi does not support UEFI secure boot",
+			expected: "baremetal.hosts\\[0\\].bootMode: Invalid value: \"UEFISecureBoot\": driver ipmi does not support UEFI secure boot",
 		},
 		{
 			name: "legacy_boot_mode",
@@ -338,6 +341,30 @@ interfaces:
           stp-priority: 32`)).build(),
 			expected: "",
 		},
+		{
+			name: "networkConfig_invalid_mtu_string",
+			platform: platform().Hosts(
+				host1().NetworkConfig(`
+interfaces:
+- name: eth0
+  type: ethernet
+  state: up
+  mtu: "1500"
+`)).build(),
+			expected: `baremetal.hosts\[0\].networkConfig.interfaces\[0\].mtu: Invalid value: "1500": mtu must be an integer \(not quoted string\)`,
+		},
+		{
+			name: "networkConfig_valid_mtu_integer",
+			platform: platform().Hosts(
+				host1().NetworkConfig(`
+interfaces:
+- name: eth0
+  type: ethernet
+  state: up
+  mtu: 1500
+`)).build(),
+			expected: "",
+		},
 	}
 
 	for _, tc := range cases {
@@ -359,6 +386,62 @@ interfaces:
 	}
 }
 
+func TestValidateHostRootDeviceHints(t *testing.T) {
+	cases := []struct {
+		name            string
+		rootDeviceHints *baremetal.RootDeviceHints
+		expectedSuccess bool
+	}{
+		{
+			name:            "nil hints",
+			expectedSuccess: true,
+		},
+		{
+			name:            "no hints",
+			rootDeviceHints: &baremetal.RootDeviceHints{},
+			expectedSuccess: true,
+		},
+		{
+			name: "non /dev path",
+			rootDeviceHints: &baremetal.RootDeviceHints{
+				DeviceName: "sda",
+			},
+		},
+		{
+			name: "/dev path",
+			rootDeviceHints: &baremetal.RootDeviceHints{
+				DeviceName: "/dev/sda",
+			},
+			expectedSuccess: true,
+		},
+		{
+			name: "by-path path",
+			rootDeviceHints: &baremetal.RootDeviceHints{
+				DeviceName: "/dev/disk/by-path/pci-0000:01:00.0-scsi-0:2:0:0",
+			},
+			expectedSuccess: true,
+		},
+		{
+			name: "by-id path",
+			rootDeviceHints: &baremetal.RootDeviceHints{
+				DeviceName: "/dev/disk/by-id/wwn-0x600508e000000000ce506dc50ab0ad05",
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			errs := ValidateHostRootDeviceHints(tc.rootDeviceHints, field.NewPath("rootDeviceHints"))
+
+			if tc.expectedSuccess {
+				assert.Empty(t, errs)
+			} else {
+				assert.NotEmpty(t, errs)
+			}
+		})
+	}
+}
+
 func TestValidateProvisioning(t *testing.T) {
 	//Used for url validations
 	imagesServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -369,21 +452,22 @@ func TestValidateProvisioning(t *testing.T) {
 	}))
 	defer imagesServer.Close()
 
-	interfaceValidator := func(p *baremetal.Platform, fldPath *field.Path) field.ErrorList {
-		errorList := field.ErrorList{}
+	origInterfaceValidator := interfaceValidator
+	t.Cleanup(func() {
+		interfaceValidator = origInterfaceValidator
+	})
+	interfaceValidator = func(libvirtURI string) (func(string) error, error) {
+		return func(interfaceName string) error {
+			interfaceNames := []string{"br0", "br1"}
+			for _, foundInterface := range interfaceNames {
+				if foundInterface == interfaceName {
+					return nil
+				}
+			}
 
-		if p.ExternalBridge != "br0" {
-			errorList = append(errorList, field.Invalid(fldPath.Child("externalBridge"), p.ExternalBridge,
-				"invalid external bridge"))
-		}
-		if p.ProvisioningBridge != "br1" {
-			errorList = append(errorList, field.Invalid(fldPath.Child("provisioningBridge"), p.ProvisioningBridge,
-				"invalid provisioning bridge"))
-		}
-
-		return errorList
+			return fmt.Errorf("could not find interface %q, valid interfaces are %s", interfaceName, strings.Join(interfaceNames, ", "))
+		}, nil
 	}
-	dynamicProvisioningValidators = append(dynamicProvisioningValidators, interfaceValidator)
 
 	cases := []struct {
 		name     string
@@ -397,25 +481,25 @@ func TestValidateProvisioning(t *testing.T) {
 				Hosts(
 					host1().BMCAddress("ipmi://192.168.111.1"),
 					host2().BMCAddress("ipmi://192.168.111.1")).build(),
-			expected: "baremetal.hosts\\[1\\].BMC.Address: Duplicate value: \"ipmi://192.168.111.1\"",
+			expected: "baremetal.hosts\\[1\\].bmc.address: Duplicate value: \"ipmi://192.168.111.1\"",
 		},
 		{
 			name: "bmc_address_required",
 			platform: platform().
 				Hosts(host1().BMCAddress("")).build(),
-			expected: "baremetal.hosts\\[0\\].BMC.Address: Required value: missing Address",
+			expected: "baremetal.hosts\\[0\\].bmc.address: Required value: missing Address",
 		},
 		{
 			name: "bmc_username_required",
 			platform: platform().
 				Hosts(host1().BMCUsername("")).build(),
-			expected: "baremetal.hosts\\[0\\].BMC.Username: Required value: missing Username",
+			expected: "baremetal.hosts\\[0\\].bmc.username: Required value: missing Username",
 		},
 		{
 			name: "bmc_password_required",
 			platform: platform().
 				Hosts(host1().BMCPassword("")).build(),
-			expected: "baremetal.hosts\\[0\\].BMC.Password: Required value: missing Password",
+			expected: "baremetal.hosts\\[0\\].bmc.password: Required value: missing Password",
 		},
 		{
 			name: "valid_with_os_image_overrides",
@@ -427,55 +511,55 @@ func TestValidateProvisioning(t *testing.T) {
 			name: "invalid_bootstraposimage",
 			platform: platform().
 				BootstrapOSImage("192.168.111.1/images/qemu.x86_64.qcow2.gz?sha256=3b5a882c2af3e19d515b961855d144f293cab30190c2bdedd661af31a1fc4e2f").build(),
-			expected: "baremetal.BootstrapOSImage: Invalid value:.*: the URI provided:.*is invalid",
+			expected: "baremetal.bootstrapOSImage: Invalid value:.*: the URI provided:.*is invalid",
 		},
 		{
 			name: "invalid_clusterosimage",
 			platform: platform().
 				ClusterOSImage("http//192.168.111.1/images/metal.x86_64.qcow2.gz?sha256=340dfa4d92450f2eee852ed1e2d02e3138cc68d824827ef9cf0a40a7ea2f93da").build(),
-			expected: "baremetal.ClusterOSImage: Invalid value:.*: the URI provided:.*is invalid",
+			expected: "baremetal.clusterOSImage: Invalid value:.*: the URI provided:.*is invalid",
 		},
 		{
 			name: "invalid_bootstraposimage_checksum",
 			platform: platform().
 				BootstrapOSImage("http://192.168.111.1/images/qemu.x86_64.qcow2.gz?md5sum=3b5a882c2af3e19d515b961855d144f293cab30190c2bdedd661af31a1fc4e2f").build(),
-			expected: "baremetal.BootstrapOSImage: Invalid value:.*: the sha256 parameter in the.*URI is missing",
+			expected: "baremetal.bootstrapOSImage: Invalid value:.*: the sha256 parameter in the.*URI is missing",
 		},
 		{
 			name: "invalid_clusterosimage_checksum",
 			platform: platform().
 				ClusterOSImage("http://192.168.111.1/images/metal.x86_64.qcow2.gz?sha256=3ee852ed1e2d02e3138cc68d824827ef9cf0a40a7ea2f93da").build(),
-			expected: "baremetal.ClusterOSImage: Invalid value:.*: the sha256 parameter in the.*URI is invalid",
+			expected: "baremetal.clusterOSImage: Invalid value:.*: the sha256 parameter in the.*URI is invalid",
 		},
 		{
 			name: "invalid_bootstraposimage_uri_scheme",
 			platform: platform().
 				BootstrapOSImage("xttp://192.168.111.1/images/qemu.x86_64.qcow2.gz?sha256=3b5a882c2af3e19d515b961855d144f293cab30190c2bdedd661af31a1fc4e2f").build(),
-			expected: "baremetal.BootstrapOSImage: Invalid value:.*: the URI provided.*must begin with http/https",
+			expected: "baremetal.bootstrapOSImage: Invalid value:.*: the URI provided.*must begin with http/https",
 		},
 		{
 			name: "invalid_clusterosimage_uri_scheme",
 			platform: platform().
 				ClusterOSImage("xttp://192.168.111.1/images/qemu.x86_64.qcow2.gz?sha256=3b5a882c2af3e19d515b961855d144f293cab30190c2bdedd661af31a1fc4e2f").build(),
-			expected: "baremetal.ClusterOSImage: Invalid value:.*: the URI provided.*must begin with http/https",
+			expected: "baremetal.clusterOSImage: Invalid value:.*: the URI provided.*must begin with http/https",
 		},
 		{
 			name: "notfound_bootstraposimage",
 			platform: platform().
 				BootstrapOSImage(imagesServer.URL + "/images/notexistent.x86_64.qcow2.gz?sha256=3b5a882c2af3e19d515b961855d144f293cab30190c2bdedd661af31a1fc4e2f").build(),
-			expected: "baremetal.BootstrapOSImage: Not found:.*",
+			expected: "baremetal.bootstrapOSImage: Not found:.*",
 		},
 		{
 			name: "notfound_clusterosimageimage",
 			platform: platform().
 				ClusterOSImage(imagesServer.URL + "/images/notexistent.x86_64.qcow2.gz?sha256=3b5a882c2af3e19d515b961855d144f293cab30190c2bdedd661af31a1fc4e2f").build(),
-			expected: "baremetal.ClusterOSImage: Not found:.*",
+			expected: "baremetal.clusterOSImage: Not found:.*",
 		},
 		{
 			name: "invalid_extbridge",
 			platform: platform().
 				ExternalBridge("noexist").build(),
-			expected: "Invalid value: \"noexist\": invalid external bridge",
+			expected: "Invalid value: \"noexist\": could not find interface \"noexist\", valid interfaces are br0, br1",
 		},
 		{
 			name:     "valid_extbridge_mac",
@@ -485,7 +569,7 @@ func TestValidateProvisioning(t *testing.T) {
 			name: "invalid_provbridge",
 			platform: platform().
 				ProvisioningBridge("noexist").build(),
-			expected: "Invalid value: \"noexist\": invalid provisioning bridge",
+			expected: "Invalid value: \"noexist\": could not find interface \"noexist\", valid interfaces are br0, br1",
 		},
 		{
 			name:     "valid_provbridge_mac",
@@ -680,7 +764,7 @@ func TestValidateProvisioning(t *testing.T) {
 				BootstrapProvisioningIP("192.168.111.3").
 				Hosts(host1().BMCAddress("ipmi://192.168.111.1")).
 				build(),
-			expected: "baremetal.Hosts\\[0\\].BMC: Invalid value: \"ipmi://192.168.111.1\": driver ipmi requires provisioning network",
+			expected: "baremetal.hosts\\[0\\].bmc: Invalid value: \"ipmi://192.168.111.1\": driver ipmi requires provisioning network",
 		},
 	}
 
@@ -950,6 +1034,11 @@ func (icb *installConfigBuilder) BareMetalPlatform(builder *platformBuilder) *in
 	icb.InstallConfig.Platform = types.Platform{
 		BareMetal: builder.build(),
 	}
+	return icb
+}
+
+func (icb *installConfigBuilder) Capabilities(capabilities types.Capabilities) *installConfigBuilder {
+	icb.InstallConfig.Capabilities = &capabilities
 	return icb
 }
 

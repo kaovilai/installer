@@ -7,6 +7,10 @@ import (
 	"time"
 
 	"github.com/pkg/errors"
+	"github.com/sirupsen/logrus"
+	"github.com/vmware/govmomi/cns"
+	cnstypes "github.com/vmware/govmomi/cns/types"
+	"github.com/vmware/govmomi/find"
 	"github.com/vmware/govmomi/object"
 	"github.com/vmware/govmomi/pbm"
 	pbmtypes "github.com/vmware/govmomi/pbm/types"
@@ -34,20 +38,27 @@ type API interface {
 	DeleteStoragePolicy(ctx context.Context, policyName string) error
 	DeleteTag(ctx context.Context, id string) error
 	DeleteTagCategory(ctx context.Context, id string) error
+	DeleteHostZoneObjects(ctx context.Context, infraID string) error
+	DeleteCnsVolumes(ctx context.Context, volume cnstypes.CnsVolume) error
+	GetCnsVolumes(ctx context.Context, infraID string) ([]cnstypes.CnsVolume, error)
+	GetVCenterName() string
 }
 
 // Client makes calls to the Azure API.
 type Client struct {
+	vcenter    string
 	client     *vim25.Client
 	restClient *rest.Client
+	cnsClient  *cns.Client
 	cleanup    vsphere.ClientLogout
+	logger     logrus.FieldLogger
 }
 
 const defaultTimeout = time.Minute * 5
 
 // NewClient initializes a client.
 // Logout() must be called when you are done with the client.
-func NewClient(vCenter, username, password string) (*Client, error) {
+func NewClient(vCenter, username, password string, logger logrus.FieldLogger) (*Client, error) {
 	vim25Client, restClient, cleanup, err := vsphere.CreateVSphereClients(
 		context.TODO(),
 		vCenter,
@@ -57,10 +68,18 @@ func NewClient(vCenter, username, password string) (*Client, error) {
 		return nil, err
 	}
 
+	cnsClient, err := cns.NewClient(context.TODO(), vim25Client)
+	if err != nil {
+		return nil, err
+	}
+
 	return &Client{
+		vcenter:    vCenter,
 		client:     vim25Client,
 		restClient: restClient,
 		cleanup:    cleanup,
+		cnsClient:  cnsClient,
+		logger:     logger,
 	}, nil
 }
 
@@ -79,8 +98,11 @@ func (c *Client) getAttachedObjectsOnTag(ctx context.Context, tag, objType strin
 
 	tagManager := tags.NewManager(c.restClient)
 	attached, err := tagManager.GetAttachedObjectsOnTags(ctx, []string{tag})
-	if err != nil && !isNotFound(err) {
-		return nil, err
+	if err != nil {
+		c.logger.Debugf("Got error when attempting to get attached objects on tags: %s", err)
+		if !isNotFound(err) {
+			return nil, err
+		}
 	}
 
 	// Separate the objects attached to the tag based on type
@@ -103,6 +125,7 @@ func (c *Client) getVirtualMachineManagedObjects(ctx context.Context, moRef []ty
 	var virtualMachineMoList []mo.VirtualMachine
 	if len(moRef) > 0 {
 		pc := property.DefaultCollector(c.client)
+		// Passing nil in for property list so that we get all properties.
 		err := pc.Retrieve(ctx, moRef, nil, &virtualMachineMoList)
 		if err != nil {
 			return nil, err
@@ -126,6 +149,11 @@ func (c *Client) getFolderManagedObjects(ctx context.Context, moRef []types.Mana
 	return folderMoList, nil
 }
 
+// GetVCenterName returns the name of the vcenter being queried.
+func (c *Client) GetVCenterName() string {
+	return c.vcenter
+}
+
 // ListFolders returns all ManagedObjects of type "Folder".
 func (c *Client) ListFolders(ctx context.Context, tagID string) ([]mo.Folder, error) {
 	folderList, err := c.getAttachedObjectsOnTag(ctx, tagID, "Folder")
@@ -139,6 +167,7 @@ func (c *Client) ListFolders(ctx context.Context, tagID string) ([]mo.Folder, er
 // ListVirtualMachines returns ManagedObjects of type "VirtualMachine".
 func (c *Client) ListVirtualMachines(ctx context.Context, tagID string) ([]mo.VirtualMachine, error) {
 	virtualMachineList, err := c.getAttachedObjectsOnTag(ctx, tagID, "VirtualMachine")
+	c.logger.WithField("vCenter", c.GetVCenterName()).WithField("Count", len(virtualMachineList)).Debug("List VirtualMachine")
 	if err != nil {
 		return nil, err
 	}
@@ -154,7 +183,7 @@ func isPoweredOff(vmMO mo.VirtualMachine) bool {
 func (c *Client) StopVirtualMachine(ctx context.Context, vmMO mo.VirtualMachine) error {
 	ctx, cancel := context.WithTimeout(ctx, time.Minute*30)
 	defer cancel()
-
+	// The following isPoweredOff() is an extra check to make sure still powered off.  We might be able to remove this.
 	if !isPoweredOff(vmMO) {
 		vm := object.NewVirtualMachine(c.client, vmMO.Reference())
 		task, err := vm.PowerOff(ctx)
@@ -185,6 +214,7 @@ func (c *Client) DeleteFolder(ctx context.Context, f mo.Folder) error {
 	defer cancel()
 
 	folder := object.NewFolder(c.client, f.Reference())
+
 	task, err := folder.Destroy(ctx)
 	if err == nil {
 		err = task.Wait(ctx)
@@ -250,8 +280,8 @@ func (c *Client) DeleteTag(ctx context.Context, id string) error {
 	return err
 }
 
-// DeleteTagCategory deletes a Tag Category named `id`.
-func (c *Client) DeleteTagCategory(ctx context.Context, id string) error {
+// DeleteTagCategory deletes a Tag Category named `categoryName`.
+func (c *Client) DeleteTagCategory(ctx context.Context, categoryName string) error {
 	ctx, cancel := context.WithTimeout(ctx, defaultTimeout)
 	defer cancel()
 
@@ -270,7 +300,7 @@ func (c *Client) DeleteTagCategory(ctx context.Context, id string) error {
 			}
 			continue
 		}
-		if category.Name == id {
+		if category.Name == categoryName {
 			if err = tagManager.DeleteCategory(ctx, category); err != nil {
 				return err
 			}
@@ -279,4 +309,128 @@ func (c *Client) DeleteTagCategory(ctx context.Context, id string) error {
 	}
 
 	return utilerrors.NewAggregate(errs)
+}
+
+// DeleteHostZoneObjects removes from the vCenter cluster the associated OCP cluster's vm-host group (VirtualMachine)
+// and the vm-host affinity rule.
+func (c *Client) DeleteHostZoneObjects(ctx context.Context, infraID string) error {
+	ctx, cancel := context.WithTimeout(ctx, defaultTimeout)
+	defer cancel()
+
+	finder := find.NewFinder(c.client, false)
+
+	datacenters, err := finder.DatacenterList(ctx, "/...")
+	if err != nil {
+		return err
+	}
+
+	for _, dc := range datacenters {
+		finder = finder.SetDatacenter(dc)
+		clusterObjs, err := finder.ClusterComputeResourceList(ctx, "/...")
+		if err != nil {
+			return err
+		}
+
+		for _, ccr := range clusterObjs {
+			clusterConfigSpec := &types.ClusterConfigSpecEx{}
+
+			clusterConfig, err := ccr.Configuration(ctx)
+			if err != nil {
+				return err
+			}
+
+			for _, r := range clusterConfig.Rule {
+				if rule, ok := r.(*types.ClusterVmHostRuleInfo); ok {
+					if strings.Contains(rule.Name, infraID) {
+						clusterConfigSpec.RulesSpec = append(clusterConfigSpec.RulesSpec, types.ClusterRuleSpec{
+							ArrayUpdateSpec: types.ArrayUpdateSpec{
+								Operation: "remove",
+								RemoveKey: rule.GetClusterRuleInfo().Key,
+							},
+							Info: &rule.ClusterRuleInfo,
+						})
+					}
+				}
+			}
+
+			for _, g := range clusterConfig.Group {
+				if vmg, ok := g.(*types.ClusterVmGroup); ok {
+					if strings.Contains(vmg.Name, infraID) {
+						clusterConfigSpec.GroupSpec = append(clusterConfigSpec.GroupSpec, types.ClusterGroupSpec{
+							ArrayUpdateSpec: types.ArrayUpdateSpec{
+								Operation: "remove",
+								RemoveKey: vmg.Name,
+							},
+							Info: &vmg.ClusterGroupInfo,
+						})
+					}
+				}
+			}
+
+			// If the rules or group spec are empty there is no need to modify the cluster
+			if len(clusterConfigSpec.RulesSpec) != 0 || len(clusterConfigSpec.GroupSpec) != 0 {
+				task, err := ccr.Reconfigure(ctx, clusterConfigSpec, true)
+				if err != nil {
+					return err
+				}
+
+				if err := task.Wait(ctx); err != nil {
+					return err
+				}
+				c.logger.WithField("VmHostRule", infraID).WithField("vCenter", c.GetVCenterName())
+			}
+		}
+	}
+
+	return nil
+}
+
+// GetCnsVolumes returns the list of CNS volumes associated with the cluster
+// that is being destroyed.
+func (c *Client) GetCnsVolumes(ctx context.Context, infraID string) ([]cnstypes.CnsVolume, error) {
+	ctx, cancel := context.WithTimeout(ctx, defaultTimeout)
+	defer cancel()
+
+	// Only return the volumes created with the cluster
+	// being destroyed
+	cnsQueryFilter := cnstypes.CnsQueryFilter{
+		ContainerClusterIds: []string{infraID},
+	}
+	cnsQuerySelection := cnstypes.CnsQuerySelection{}
+
+	volumes, err := c.cnsClient.QueryAllVolume(ctx, cnsQueryFilter, cnsQuerySelection)
+	if err != nil {
+		return nil, err
+	}
+
+	cnsVolumes := make([]cnstypes.CnsVolume, 0, len(volumes.Volumes))
+
+	for _, v := range volumes.Volumes {
+		// This must be called to retrieve the ClusterId
+		result, err := c.cnsClient.QueryVolume(ctx, cnstypes.CnsQueryFilter{VolumeIds: []cnstypes.CnsVolumeId{v.VolumeId}})
+		if err != nil {
+			return nil, err
+		}
+
+		// Confirm that the cluster id matches the infraid
+		for _, rv := range result.Volumes {
+			if rv.Metadata.ContainerCluster.ClusterId == infraID {
+				cnsVolumes = append(cnsVolumes, rv)
+			}
+		}
+	}
+	return cnsVolumes, nil
+}
+
+// DeleteCnsVolumes deletes the CNS volume.
+func (c *Client) DeleteCnsVolumes(ctx context.Context, volume cnstypes.CnsVolume) error {
+	ctx, cancel := context.WithTimeout(ctx, defaultTimeout)
+	defer cancel()
+
+	// More odd VMware APIs. This is a slice but it can only take a single volume
+	task, err := c.cnsClient.DeleteVolume(ctx, []cnstypes.CnsVolumeId{volume.VolumeId}, true)
+	if err != nil {
+		return err
+	}
+	return task.Wait(ctx)
 }

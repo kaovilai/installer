@@ -20,8 +20,12 @@ import (
 type HostRoleUpdateParams string
 
 func NewHostRoleUpdateParams(value HostRoleUpdateParams) *HostRoleUpdateParams {
-	v := value
-	return &v
+	return &value
+}
+
+// Pointer returns a pointer to a freshly-allocated HostRoleUpdateParams.
+func (m HostRoleUpdateParams) Pointer() *HostRoleUpdateParams {
+	return &m
 }
 
 const (
@@ -32,6 +36,9 @@ const (
 	// HostRoleUpdateParamsMaster captures enum value "master"
 	HostRoleUpdateParamsMaster HostRoleUpdateParams = "master"
 
+	// HostRoleUpdateParamsArbiter captures enum value "arbiter"
+	HostRoleUpdateParamsArbiter HostRoleUpdateParams = "arbiter"
+
 	// HostRoleUpdateParamsWorker captures enum value "worker"
 	HostRoleUpdateParamsWorker HostRoleUpdateParams = "worker"
 )
@@ -41,7 +48,7 @@ var hostRoleUpdateParamsEnum []interface{}
 
 func init() {
 	var res []HostRoleUpdateParams
-	if err := json.Unmarshal([]byte(`["auto-assign","master","worker"]`), &res); err != nil {
+	if err := json.Unmarshal([]byte(`["auto-assign","master","arbiter","worker"]`), &res); err != nil {
 		panic(err)
 	}
 	for _, v := range res {

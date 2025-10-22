@@ -8,8 +8,8 @@ import (
 // +kubebuilder:validation:Enum="";thin;thick;eagerZeroedThick
 type DiskType string
 
-// FailureDomainType is the name of the failure domain type.
-// There are two defined failure domains currently, Datacenter and ComputeCluster.
+// FailureDomainType is the string representation name of the failure domain type.
+// There are three defined failure domains types currently, Datacenter, ComputeCluster and HostGroup.
 // Each represents a vCenter object type within a vSphere environment.
 // +kubebuilder:validation:Enum=HostGroup;Datacenter;ComputeCluster
 type FailureDomainType string
@@ -29,6 +29,24 @@ const (
 
 	// TagCategoryZone the tag category associated with zones.
 	TagCategoryZone = "openshift-zone"
+)
+
+const (
+	// ControlPlaneRole represents control-plane nodes.
+	ControlPlaneRole = "control-plane"
+	// ComputeRole represents worker nodes.
+	ComputeRole = "compute"
+	// BootstrapRole represents bootstrap nodes.
+	BootstrapRole = "bootstrap"
+)
+
+const (
+	// HostGroupFailureDomain is a failure domain for a vCenter vm-host group.
+	HostGroupFailureDomain FailureDomainType = "HostGroup"
+	// ComputeClusterFailureDomain is a failure domain for a vCenter compute cluster.
+	ComputeClusterFailureDomain FailureDomainType = "ComputeCluster"
+	// DatacenterFailureDomain is a failure domain for a vCenter datacenter.
+	DatacenterFailureDomain FailureDomainType = "Datacenter"
 )
 
 // Platform stores any global configuration used for vsphere platforms.
@@ -110,9 +128,8 @@ type Platform struct {
 	// of vsphere.
 	DiskType DiskType `json:"diskType,omitempty"`
 	// VCenters holds the connection details for services to communicate with vCenter.
-	// Currently only a single vCenter is supported.
 	// +kubebuilder:validation:Optional
-	// +kubebuilder:validation:MaxItems=1
+	// +kubebuilder:validation:MaxItems=3
 	// +kubebuilder:validation:MinItems=1
 	VCenters []VCenter `json:"vcenters,omitempty"`
 	// FailureDomains holds the VSpherePlatformFailureDomainSpec which contains
@@ -121,10 +138,20 @@ type Platform struct {
 	// +kubebuilder:validation:Optional
 	FailureDomains []FailureDomain `json:"failureDomains,omitempty"`
 
+	// nodeNetworking contains the definition of internal and external network constraints for
+	// assigning the node's networking.
+	// If this field is omitted, networking defaults to the legacy
+	// address selection behavior which is to only support a single address and
+	// return the first one found.
+	// +optional
+	NodeNetworking *configv1.VSpherePlatformNodeNetworking `json:"nodeNetworking,omitempty"`
+
 	// LoadBalancer defines how the load balancer used by the cluster is configured.
 	// LoadBalancer is available in TechPreview.
 	// +optional
 	LoadBalancer *configv1.VSpherePlatformLoadBalancer `json:"loadBalancer,omitempty"`
+	// Hosts defines network configurations to be applied by the installer. Hosts is available in TechPreview.
+	Hosts []*Host `json:"hosts,omitempty"`
 }
 
 // FailureDomain holds the region and zone failure domain and
@@ -140,11 +167,21 @@ type FailureDomain struct {
 	// region defines a FailureDomainCoordinate which
 	// includes the name of the vCenter tag, the failure domain type
 	// and the name of the vCenter tag category.
+
+	// The region is the name of the tag in vCenter that is associated with the
+	// tag category `openshift-region`. The region name must match the tag name
+	// and must exist prior to installation. When the regionType is Datacenter
+	// the tag must be attached to the toplogy.datacenter object in vCenter.
+	// When the regionType is ComputeCluster the tag must be attached to the topology.computeCluster
+	// object in vCenter.
 	// +kubebuilder:validation:Required
 	Region string `json:"region"`
-	// zone defines a VSpherePlatformFailureDomain which
-	// includes the name of the vCenter tag, the failure domain type
-	// and the name of the vCenter tag category.
+	// The zone is the name of the tag in vCenter that is associated with
+	// the tag category `openshift-zone`. The zone name must match the tag name
+	// and must exist prior to installation. When zoneType is HostGroup the
+	// ESXi hosts defined in the provided in the topology.hostGroup field must be tagged.
+	// When the zoneType is ComputeCluster the tag must be attached to the topology.computeCluster
+	// object in vCenter.
 	// +kubebuilder:validation:Required
 	Zone string `json:"zone"`
 	// server is the fully-qualified domain name or the IP address of the vCenter server.
@@ -155,6 +192,22 @@ type FailureDomain struct {
 	// Topology describes a given failure domain using vSphere constructs
 	// +kubebuilder:validation:Required
 	Topology Topology `json:"topology"`
+
+	// regionType is the type of failure domain region, the current values are "Datacenter" and "ComputeCluster"
+	// +kubebuilder:validation:Enum=Datacenter;ComputeCluster
+	// When regionType is Datacenter the zoneType must be ComputeCluster.
+	// When regionType is ComputeCluster the zoneType must be HostGroup
+	// +optional
+	RegionType FailureDomainType `json:"regionType,omitempty"`
+	// zoneType is the type of the failure domain zone, the current values are "ComputeCluster" and "HostGroup"
+
+	// When zoneType is ComputeCluster the regionType must be Datacenter
+	// When zoneType is HostGroup the regionType must be ComputeCluster
+	// If the zoneType is HostGroup topology.hostGroup must be defined and exist in vCenter
+	// prior to installation.
+	// +kubebuilder:validation:Enum=ComputeCluster;HostGroup
+	// +optional
+	ZoneType FailureDomainType `json:"zoneType,omitempty"`
 }
 
 // Topology holds the required and optional vCenter objects - datacenter,
@@ -173,6 +226,9 @@ type Topology struct {
 	// +kubebuilder:validation:MaxLength=2048
 	ComputeCluster string `json:"computeCluster"`
 	// networks is the list of networks within this failure domain
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=10
 	Networks []string `json:"networks,omitempty"`
 	// datastore is the name or inventory path of the datastore in which the
 	// virtual machine is created/located.
@@ -194,6 +250,25 @@ type Topology struct {
 	// +kubebuilder:validation:Pattern=`^/.*?/vm/.*?`
 	// +optional
 	Folder string `json:"folder,omitempty"`
+	// template is the inventory path of the virtual machine or template
+	// that will be used for cloning.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=2048
+	// +kubebuilder:validation:Pattern=`^/.*?/vm/.*?`
+	// +optional
+	Template string `json:"template,omitempty"`
+	// tagIDs is an optional set of tags to add to an instance. Specified tagIDs
+	// must use URN-notation instead of display names. A maximum of 10 tag IDs may be specified.
+	// +kubebuilder:example=`urn:vmomi:InventoryServiceTag:5736bf56-49f5-4667-b38c-b97e09dc9578:GLOBAL`
+	// +optional
+	TagIDs []string `json:"tagIDs,omitempty"`
+
+	// hostGroup is the name of the vm-host group of type host within vCenter for this failure domain.
+	// hostGroup is limited to 80 characters.
+	// This field is required when the ZoneType is HostGroup
+	// +kubebuilder:validation:MaxLength=80
+	// +optional
+	HostGroup string `json:"hostGroup,omitempty"`
 }
 
 // VCenter stores the vCenter connection fields
@@ -221,4 +296,60 @@ type VCenter struct {
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinItems=1
 	Datacenters []string `json:"datacenters"`
+}
+
+// Host defines host VMs to generate as part of the installation.
+type Host struct {
+	// FailureDomain refers to the name of a FailureDomain as described in https://github.com/openshift/enhancements/blob/master/enhancements/installer/vsphere-ipi-zonal.md
+	// +optional
+	FailureDomain string `json:"failureDomain"`
+	// NetworkDeviceSpec to be applied to the host
+	// +kubebuilder:validation:Required
+	NetworkDevice *NetworkDeviceSpec `json:"networkDevice"`
+	// Role defines the role of the node
+	// +kubebuilder:validation:Enum="";bootstrap;control-plane;compute
+	// +kubebuilder:validation:Required
+	Role string `json:"role"`
+}
+
+// NetworkDeviceSpec defines network config for static IP assignment.
+type NetworkDeviceSpec struct {
+	// gateway is an IPv4 or IPv6 address which represents the subnet gateway,
+	// for example, 192.168.1.1.
+	// +kubebuilder:validation:Format=ipv4
+	// +kubebuilder:validation:Format=ipv6
+	Gateway string `json:"gateway,omitempty"`
+
+	// ipAddrs is a list of one or more IPv4 and/or IPv6 addresses and CIDR to assign to
+	// this device, for example, 192.168.1.100/24. IP addresses provided via ipAddrs are
+	// intended to allow explicit assignment of a machine's IP address.
+	// +kubebuilder:validation:Format=ipv4
+	// +kubebuilder:validation:Format=ipv6
+	// +kubebuilder:example=`192.168.1.100/24`
+	// +kubebuilder:example=`2001:DB8:0000:0000:244:17FF:FEB6:D37D/64`
+	// +kubebuilder:validation:Required
+	IPAddrs []string `json:"ipAddrs"`
+
+	// nameservers is a list of IPv4 and/or IPv6 addresses used as DNS nameservers, for example,
+	// 8.8.8.8. a nameserver is not provided by a fulfilled IPAddressClaim. If DHCP is not the
+	// source of IP addresses for this network device, nameservers should include a valid nameserver.
+	// +kubebuilder:validation:Format=ipv4
+	// +kubebuilder:validation:Format=ipv6
+	// +kubebuilder:example=`8.8.8.8`
+	Nameservers []string `json:"nameservers,omitempty"`
+}
+
+// IsControlPlane checks if the current host is a master.
+func (h *Host) IsControlPlane() bool {
+	return h.Role == ControlPlaneRole
+}
+
+// IsCompute checks if the current host is a worker.
+func (h *Host) IsCompute() bool {
+	return h.Role == ComputeRole
+}
+
+// IsBootstrap checks if the current host is a bootstrap.
+func (h *Host) IsBootstrap() bool {
+	return h.Role == BootstrapRole
 }

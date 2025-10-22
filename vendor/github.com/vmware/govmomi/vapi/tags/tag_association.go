@@ -81,7 +81,11 @@ func (c *Manager) AttachTagToMultipleObjects(ctx context.Context, tagID string, 
 
 	var ids []internal.AssociatedObject
 	for i := range refs {
-		ids = append(ids, internal.AssociatedObject(refs[i].Reference()))
+		ref := refs[i].Reference()
+		ids = append(ids, internal.AssociatedObject{
+			Type:  ref.Type,
+			Value: ref.Value,
+		})
 	}
 
 	spec := struct {
@@ -99,7 +103,7 @@ func (c *Manager) AttachTagToMultipleObjects(ctx context.Context, tagID string, 
 // not successfully attached to the managed object reference it might leave the
 // managed object reference in a partially tagged state and needs to be resolved
 // by the caller. In this case BatchErrors is returned and can be used to
-// analyse failure reasons on each failed tag.
+// analyze failure reasons on each failed tag.
 //
 // Specified tagIDs must use URN-notation instead of display names or a generic
 // error will be returned and no tagging operation will be performed. If the
@@ -116,7 +120,10 @@ func (c *Manager) AttachMultipleTagsToObject(ctx context.Context, tagIDs []strin
 		}
 	}
 
-	obj := internal.AssociatedObject(ref.Reference())
+	obj := internal.AssociatedObject{
+		Type:  ref.Reference().Type,
+		Value: ref.Reference().Value,
+	}
 	spec := struct {
 		ObjectID internal.AssociatedObject `json:"object_id"`
 		TagIDs   []string                  `json:"tag_ids"`
@@ -149,7 +156,7 @@ func (c *Manager) AttachMultipleTagsToObject(ctx context.Context, tagIDs []strin
 // not successfully detached from the managed object reference it might leave
 // the managed object reference in a partially tagged state and needs to be
 // resolved by the caller. In this case BatchErrors is returned and can be used
-// to analyse failure reasons on each failed tag.
+// to analyze failure reasons on each failed tag.
 //
 // Specified tagIDs must use URN-notation instead of display names or a generic
 // error will be returned and no tagging operation will be performed. If the
@@ -166,7 +173,10 @@ func (c *Manager) DetachMultipleTagsFromObject(ctx context.Context, tagIDs []str
 		}
 	}
 
-	obj := internal.AssociatedObject(ref.Reference())
+	obj := internal.AssociatedObject{
+		Type:  ref.Reference().Type,
+		Value: ref.Reference().Value,
+	}
 	spec := struct {
 		ObjectID internal.AssociatedObject `json:"object_id"`
 		TagIDs   []string                  `json:"tag_ids"`
@@ -197,7 +207,10 @@ func (c *Manager) ListAttachedTags(ctx context.Context, ref mo.Reference) ([]str
 	spec := internal.NewAssociation(ref)
 	url := c.Resource(internal.AssociationPath).WithAction("list-attached-tags")
 	var res []string
-	return res, c.Do(ctx, url.Request(http.MethodPost, spec), &res)
+	if err := c.Do(ctx, url.Request(http.MethodPost, spec), &res); err != nil {
+		return nil, err
+	}
+	return res, nil
 }
 
 // GetAttachedTags fetches the array of tags attached to the given object.
@@ -281,7 +294,10 @@ func (c *Manager) ListAttachedObjectsOnTags(ctx context.Context, tagID []string)
 
 	url := c.Resource(internal.AssociationPath).WithAction("list-attached-objects-on-tags")
 	var res []AttachedObjects
-	return res, c.Do(ctx, url.Request(http.MethodPost, spec), &res)
+	if err := c.Do(ctx, url.Request(http.MethodPost, spec), &res); err != nil {
+		return nil, err
+	}
+	return res, nil
 }
 
 // GetAttachedObjectsOnTags combines ListAttachedObjectsOnTags and populates each Tag field.
@@ -321,6 +337,7 @@ func (t *AttachedTags) UnmarshalJSON(b []byte) error {
 	var o struct {
 		ObjectID internal.AssociatedObject `json:"object_id"`
 		TagIDs   []string                  `json:"tag_ids"`
+		Tags     []Tag                     `json:"tags,omitempty"`
 	}
 	err := json.Unmarshal(b, &o)
 	if err != nil {
@@ -329,6 +346,7 @@ func (t *AttachedTags) UnmarshalJSON(b []byte) error {
 
 	t.ObjectID = o.ObjectID
 	t.TagIDs = o.TagIDs
+	t.Tags = o.Tags
 
 	return nil
 }
@@ -337,7 +355,11 @@ func (t *AttachedTags) UnmarshalJSON(b []byte) error {
 func (c *Manager) ListAttachedTagsOnObjects(ctx context.Context, objectID []mo.Reference) ([]AttachedTags, error) {
 	var ids []internal.AssociatedObject
 	for i := range objectID {
-		ids = append(ids, internal.AssociatedObject(objectID[i].Reference()))
+		ref := objectID[i].Reference()
+		ids = append(ids, internal.AssociatedObject{
+			Type:  ref.Type,
+			Value: ref.Value,
+		})
 	}
 
 	spec := struct {
@@ -346,7 +368,10 @@ func (c *Manager) ListAttachedTagsOnObjects(ctx context.Context, objectID []mo.R
 
 	url := c.Resource(internal.AssociationPath).WithAction("list-attached-tags-on-objects")
 	var res []AttachedTags
-	return res, c.Do(ctx, url.Request(http.MethodPost, spec), &res)
+	if err := c.Do(ctx, url.Request(http.MethodPost, spec), &res); err != nil {
+		return nil, err
+	}
+	return res, nil
 }
 
 // GetAttachedTagsOnObjects calls ListAttachedTagsOnObjects and populates each Tags field.

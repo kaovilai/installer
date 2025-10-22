@@ -1,53 +1,99 @@
 package gcp
 
 import (
+	"context"
 	"fmt"
+	"regexp"
+	"strings"
 
-	compute "google.golang.org/api/compute/v1"
+	"google.golang.org/api/compute/v1"
+	"google.golang.org/api/googleapi"
 	"k8s.io/apimachinery/pkg/util/sets"
 )
+
+type resourceFilterFunc func(string) bool
+
+func (o *ClusterUninstaller) createLoadBalancerFilterFunc(loadBalancerName string) resourceFilterFunc {
+	return func(itemName string) bool {
+		return strings.HasPrefix(itemName, loadBalancerName)
+	}
+}
 
 // listCloudControllerInstanceGroups returns instance groups created by the cloud controller.
 // It list all instance groups matching the cloud controller name convention.
 // https://github.com/openshift/kubernetes/blob/1e5983903742f64bca36a464582178c940353e9a/pkg/cloudprovider/providers/gce/gce_loadbalancer_naming.go#L33-L40
 // https://github.com/openshift/kubernetes/blob/1e5983903742f64bca36a464582178c940353e9a/pkg/cloudprovider/providers/gce/gce_clusterid.go#L210-L238
-func (o *ClusterUninstaller) listCloudControllerInstanceGroups() ([]cloudResource, error) {
-	filter := fmt.Sprintf("name eq \"k8s-ig--%s\"", o.cloudControllerUID)
-	return o.listInstanceGroupsWithFilter("items/*/instanceGroups(name,selfLink,zone),nextPageToken", filter, nil)
+func (o *ClusterUninstaller) listCloudControllerInstanceGroups(ctx context.Context) ([]cloudResource, error) {
+	return o.listInstanceGroupsWithFilter(ctx, "items/*/instanceGroups(name,selfLink,zone),nextPageToken", func(itemName string) bool {
+		// TODO: Why does this have an extra - ??
+		return itemName == fmt.Sprintf("k8s-ig--%s", o.cloudControllerUID)
+	})
 }
 
 // listCloudControllerBackendServices returns backend services created by the cloud controller.
 // It list all backend services matching the cloud controller name convention that contain
 // only cluster instance groups.
-func (o *ClusterUninstaller) listCloudControllerBackendServices(instanceGroups []cloudResource) ([]cloudResource, error) {
-	urls := sets.NewString()
-	for _, instanceGroup := range instanceGroups {
-		urls.Insert(instanceGroup.url)
-	}
-	filter := "name eq \"a[0-9a-f]{30,50}\""
-	return o.listBackendServicesWithFilter("items(name,backends),nextPageToken", filter, func(item *compute.BackendService) bool {
-		if len(item.Backends) == 0 {
-			return false
-		}
-		for _, backend := range item.Backends {
-			if !urls.Has(backend.Group) {
+func (o *ClusterUninstaller) listCloudControllerBackendServices(ctx context.Context, instanceGroups []cloudResource) ([]cloudResource, error) {
+	return o.listBackendServicesWithFilter(ctx, regionBackendServiceResource, "items(name,backends),nextPageToken",
+		func(item *compute.BackendService) bool {
+			filter := regexp.MustCompile(`a[0-9a-f]{30,50}`)
+			if !filter.MatchString(item.Name) {
 				return false
 			}
-		}
-		return true
-	})
+
+			// During cluster creation, the backends may be empty in the Backend Service. When this is the case,
+			// the cluster uninstaller does not know if the resource should actually be considered for deletion.
+			// Search for a resource that should be related to the Backend Service, a Firewall Rule. The firewall
+			// rule should have tags that include the cluster ID in the name.
+			// TODO: when/if the shared tag is used this could pose future problems (until the backend service can be tagged).
+			// TODO: When backend services can be tagged, use the resource manager to get tags for the backend service.
+
+			fwList, err := o.computeSvc.Firewalls.List(o.ProjectID).Fields(googleapi.Field("items(name,targetTags),nextPageToken")).Context(ctx).Do()
+			if err != nil {
+				o.Logger.Debugf("failed to list firewall rules associated with backend service %s: %v", item.Name, err)
+				return false
+			}
+			for _, fw := range fwList.Items {
+				if strings.Contains(fw.Name, item.Name) {
+					for _, tag := range fw.TargetTags {
+						// These tags are in the form {o.ClusterID}-worker
+						if strings.Contains(tag, o.ClusterID) {
+							return true
+						}
+					}
+				}
+			}
+
+			urls := sets.Set[string]{}
+			for _, instanceGroup := range instanceGroups {
+				urls.Insert(instanceGroup.url)
+			}
+			if len(item.Backends) == 0 {
+				return false
+			}
+
+			// If the backends for the Backend Service are not empty, compare them to the instance
+			// group urls to determine if they are associated with each other. A match indicates that
+			// this Backend Service is part of the cluster being destroyed.
+			for _, backend := range item.Backends {
+				if !urls.Has(backend.Group) {
+					return false
+				}
+			}
+			return true
+		})
 }
 
 // listCloudControllerTargetPools returns target pools created by the cloud controller or owned by the cloud controller.
 // It lists all target pools matching the cloud controller name convention that contain
 // only cluster instances or cluster instances that were owned by the cluster.
-func (o *ClusterUninstaller) listCloudControllerTargetPools(instances []cloudResource) ([]cloudResource, error) {
-	filter := "name eq \"a[0-9a-f]{30,50}\""
-	return o.listTargetPoolsWithFilter("items(name,instances),nextPageToken", filter, func(pool *compute.TargetPool) bool {
-		if len(pool.Instances) == 0 {
+func (o *ClusterUninstaller) listCloudControllerTargetPools(ctx context.Context, instances []cloudResource) ([]cloudResource, error) {
+	return o.listTargetPoolsWithFilter(ctx, "items(name,instances),nextPageToken", func(item *compute.TargetPool) bool {
+		filter := regexp.MustCompile(`a[0-9a-f]{30,50}`)
+		if !filter.MatchString(item.Name) || len(item.Instances) == 0 {
 			return false
 		}
-		for _, instanceURL := range pool.Instances {
+		for _, instanceURL := range item.Instances {
 			name, _ := o.getInstanceNameAndZone(instanceURL)
 			if !o.isClusterResource(name) {
 				foundClusterResource := false
@@ -59,7 +105,7 @@ func (o *ClusterUninstaller) listCloudControllerTargetPools(instances []cloudRes
 				}
 
 				if !foundClusterResource {
-					o.Logger.Debugf("Invalid instance %s in target pool %s, target pool will not be destroyed", name, pool.Name)
+					o.Logger.Debugf("Skipping target pool instance %s because it is not a cluster resource", item.Name)
 					return false
 				}
 			}
@@ -71,67 +117,82 @@ func (o *ClusterUninstaller) listCloudControllerTargetPools(instances []cloudRes
 // DiscoverCloudControllerLoadBalancerResources follows a similar procedure as:
 // https://github.com/openshift/kubernetes/blob/1e5983903742f64bca36a464582178c940353e9a/pkg/cloudprovider/providers/gce/gce_loadbalancer_internal.go#L222
 // https://github.com/openshift/kubernetes/blob/1e5983903742f64bca36a464582178c940353e9a/pkg/cloudprovider/providers/gce/gce_loadbalancer_external.go#L289
-func (o *ClusterUninstaller) discoverCloudControllerLoadBalancerResources(loadBalancerName string) error {
-	loadBalancerNameFilter := fmt.Sprintf("name eq \"%s\"", loadBalancerName)
+func (o *ClusterUninstaller) discoverCloudControllerLoadBalancerResources(ctx context.Context, loadBalancerName string) error {
+	loadBalancerFilterFunc := o.createLoadBalancerFilterFunc(loadBalancerName)
 
 	// Discover associated addresses: loadBalancerName
-	found, err := o.listAddressesWithFilter("items(name),nextPageToken", loadBalancerNameFilter, nil)
+	found, err := o.listAddressesWithFilter(ctx, regionalAddressResource, "items(name),nextPageToken", loadBalancerFilterFunc)
 	if err != nil {
 		return err
 	}
-	o.insertPendingItems("address", found)
+	o.insertPendingItems(regionalAddressResource, found)
 
 	// Discover associated firewall rules: loadBalancerName
-	found, err = o.listFirewallsWithFilter("items(name),nextPageToken", loadBalancerNameFilter, nil)
+	found, err = o.listFirewallsWithFilter(ctx, "items(name),nextPageToken", loadBalancerFilterFunc)
 	if err != nil {
 		return err
 	}
-	o.insertPendingItems("firewall", found)
+	o.insertPendingItems(firewallResourceName, found)
 
 	// Discover associated firewall rules: loadBalancerName-hc
-	filter := fmt.Sprintf("name eq \"%s-hc\"", loadBalancerName)
-	found, err = o.listFirewallsWithFilter("items(name),nextPageToken", filter, nil)
+	found, err = o.listFirewallsWithFilter(ctx, "items(name),nextPageToken", o.createLoadBalancerFilterFunc(fmt.Sprintf("%s-hc", loadBalancerName)))
 	if err != nil {
 		return err
 	}
-	o.insertPendingItems("firewall", found)
+	o.insertPendingItems(firewallResourceName, found)
 
 	// Discover associated firewall rules: k8s-fw-loadBalancerName
-	filter = fmt.Sprintf("name eq \"k8s-fw-%s\"", loadBalancerName)
-	found, err = o.listFirewallsWithFilter("items(name),nextPageToken", filter, nil)
+	found, err = o.listFirewallsWithFilter(ctx, "items(name),nextPageToken",
+		o.createLoadBalancerFilterFunc(fmt.Sprintf("k8s-fw-%s", loadBalancerName)),
+	)
 	if err != nil {
 		return err
 	}
-	o.insertPendingItems("firewall", found)
+	o.insertPendingItems(firewallResourceName, found)
 
 	// Discover associated firewall rules: k8s-loadBalancerName-http-hc
-	filter = fmt.Sprintf("name eq \"k8s-%s-http-hc\"", loadBalancerName)
-	found, err = o.listFirewallsWithFilter("items(name),nextPageToken", filter, nil)
+	found, err = o.listFirewallsWithFilter(ctx, "items(name),nextPageToken",
+		o.createLoadBalancerFilterFunc(fmt.Sprintf("k8s-%s-http-hc", loadBalancerName)),
+	)
 	if err != nil {
 		return err
 	}
-	o.insertPendingItems("firewall", found)
+	o.insertPendingItems(firewallResourceName, found)
 
 	// Discover associated forwarding rules: loadBalancerName
-	found, err = o.listForwardingRulesWithFilter("items(name),nextPageToken", loadBalancerNameFilter, nil)
+	found, err = o.listForwardingRulesWithFilter(ctx, regionForwardingRuleResource, "items(name),nextPageToken", loadBalancerFilterFunc)
 	if err != nil {
 		return err
 	}
-	o.insertPendingItems("forwardingrule", found)
+	o.insertPendingItems(regionForwardingRuleResource, found)
+
+	// Discover associated target tcp proxies: loadBalancerName
+	found, err = o.listTargetTCPProxiesWithFilter(ctx, globalTargetTCPProxyResource, "items(name),nextPageToken", loadBalancerFilterFunc)
+	if err != nil {
+		return err
+	}
+	o.insertPendingItems(globalTargetTCPProxyResource, found)
 
 	// Discover associated health checks: loadBalancerName
-	found, err = o.listHealthChecksWithFilter("items(name),nextPageToken", loadBalancerNameFilter, nil)
+	found, err = o.listHealthChecksWithFilter(ctx, regionHealthCheckResource, "items(name),nextPageToken", loadBalancerFilterFunc)
 	if err != nil {
 		return err
 	}
-	o.insertPendingItems("healthcheck", found)
+	o.insertPendingItems(regionHealthCheckResource, found)
+
+	// Discover associated health checks: loadBalancerName - GLOBAL
+	found, err = o.listHealthChecksWithFilter(ctx, globalHealthCheckResource, "items(name),nextPageToken", loadBalancerFilterFunc)
+	if err != nil {
+		return err
+	}
+	o.insertPendingItems(globalHealthCheckResource, found)
 
 	// Discover associated http health checks: loadBalancerName
-	found, err = o.listHTTPHealthChecksWithFilter("items(name),nextPageToken", loadBalancerNameFilter, nil)
+	found, err = o.listHTTPHealthChecksWithFilter(ctx, "items(name),nextPageToken", loadBalancerFilterFunc)
 	if err != nil {
 		return err
 	}
-	o.insertPendingItems("httphealthcheck", found)
+	o.insertPendingItems(httpHealthCheckResourceName, found)
 
 	return nil
 }
@@ -141,87 +202,92 @@ func (o *ClusterUninstaller) discoverCloudControllerLoadBalancerResources(loadBa
 // belonging to this cluster, then finds backend resources that point to these instance groups.
 // For each of those backend services, resources like forwarding rules, firewalls, health checks and
 // backend services are added to pendingItems
-func (o *ClusterUninstaller) discoverCloudControllerResources() error {
+func (o *ClusterUninstaller) discoverCloudControllerResources(ctx context.Context) error {
 	o.Logger.Debugf("Discovering cloud controller resources")
 	errs := []error{}
 
 	// Instance group related items
-	instanceGroups, err := o.listCloudControllerInstanceGroups()
+	instanceGroups, err := o.listCloudControllerInstanceGroups(ctx)
 	if err != nil {
 		return err
 	}
-	installerInstanceGroups, err := o.listInstanceGroups()
+	installerInstanceGroups, err := o.listInstanceGroups(ctx)
 	if err != nil {
 		return err
 	}
 	clusterInstanceGroups := append(instanceGroups, installerInstanceGroups...)
 	if len(clusterInstanceGroups) != 0 {
-		backends, err := o.listCloudControllerBackendServices(clusterInstanceGroups)
+		backends, err := o.listCloudControllerBackendServices(ctx, clusterInstanceGroups)
 		if err != nil {
 			return err
 		}
 		for _, backend := range backends {
 			o.Logger.Debugf("Discovering cloud controller resources for %s", backend.name)
-			err := o.discoverCloudControllerLoadBalancerResources(backend.name)
+			err := o.discoverCloudControllerLoadBalancerResources(ctx, backend.name)
 			if err != nil {
 				errs = append(errs, err)
 			}
 		}
-		o.insertPendingItems("backendservice", backends)
+		o.insertPendingItems(regionBackendServiceResource, backends)
 	}
-	o.insertPendingItems("instancegroup", instanceGroups)
+	o.insertPendingItems(instanceGroupResourceName, instanceGroups)
 
 	// Get a list of known cluster instances
-	instances, err := o.listInstances()
+	instances, err := o.listInstances(ctx)
 	if err != nil {
 		return err
 	}
 
 	// Target pool related items
-	pools, err := o.listCloudControllerTargetPools(instances)
+	pools, err := o.listCloudControllerTargetPools(ctx, instances)
 	if err != nil {
 		return err
 	}
 	for _, pool := range pools {
 		o.Logger.Debugf("Discovering cloud controller resources for %s", pool.name)
-		err := o.discoverCloudControllerLoadBalancerResources(pool.name)
+		err := o.discoverCloudControllerLoadBalancerResources(ctx, pool.name)
 		if err != nil {
 			errs = append(errs, err)
 		}
 	}
-	o.insertPendingItems("targetpool", pools)
+	o.insertPendingItems(targetPoolResourceName, pools)
 
 	// cloudControllerUID related items
 	if len(o.cloudControllerUID) > 0 {
 		// Discover Cloud Controller health checks: k8s-cloudControllerUID-node
-		filter := fmt.Sprintf("name eq \"k8s-%s-node\"", o.cloudControllerUID)
-		found, err := o.listHealthChecksWithFilter("items(name),nextPageToken", filter, nil)
+		found, err := o.listHealthChecksWithFilter(ctx, regionHealthCheckResource, "items(name),nextPageToken",
+			o.createLoadBalancerFilterFunc(fmt.Sprintf("k8s-%s-node", o.cloudControllerUID)),
+		)
 		if err != nil {
 			return err
 		}
-		o.insertPendingItems("healthcheck", found)
+		o.insertPendingItems(regionHealthCheckResource, found)
 
 		// Discover Cloud Controller http health checks: k8s-cloudControllerUID-node
-		found, err = o.listHTTPHealthChecksWithFilter("items(name),nextPageToken", filter, nil)
+		found, err = o.listHTTPHealthChecksWithFilter(ctx, "items(name),nextPageToken",
+			o.createLoadBalancerFilterFunc(fmt.Sprintf("k8s-%s-node", o.cloudControllerUID)),
+		)
 		if err != nil {
 			return err
 		}
-		o.insertPendingItems("httphealthcheck", found)
+		o.insertPendingItems(httpHealthCheckResourceName, found)
 
 		// Discover Cloud Controller firewall rules: k8s-cloudControllerUID-node-hc, k8s-cloudControllerUID-node-http-hc
-		filter = fmt.Sprintf("name eq \"k8s-%s-node-hc\"", o.cloudControllerUID)
-		found, err = o.listFirewallsWithFilter("items(name),nextPageToken", filter, nil)
+		found, err = o.listFirewallsWithFilter(ctx, "items(name),nextPageToken",
+			o.createLoadBalancerFilterFunc(fmt.Sprintf("k8s-%s-node-hc", o.cloudControllerUID)),
+		)
 		if err != nil {
 			return err
 		}
-		o.insertPendingItems("firewall", found)
+		o.insertPendingItems(firewallResourceName, found)
 
-		filter = fmt.Sprintf("name eq \"k8s-%s-node-http-hc\"", o.cloudControllerUID)
-		found, err = o.listFirewallsWithFilter("items(name),nextPageToken", filter, nil)
+		found, err = o.listFirewallsWithFilter(ctx, "items(name),nextPageToken",
+			o.createLoadBalancerFilterFunc(fmt.Sprintf("k8s-%s-node-http-hc", o.cloudControllerUID)),
+		)
 		if err != nil {
 			return err
 		}
-		o.insertPendingItems("firewall", found)
+		o.insertPendingItems(firewallResourceName, found)
 	}
 
 	return aggregateError(errs, 0)

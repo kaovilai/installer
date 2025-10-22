@@ -5,18 +5,17 @@ import (
 	"fmt"
 
 	"github.com/pkg/errors"
+	"github.com/sirupsen/logrus"
 
 	"github.com/openshift/installer/pkg/asset"
 	awsconfig "github.com/openshift/installer/pkg/asset/installconfig/aws"
 	gcpconfig "github.com/openshift/installer/pkg/asset/installconfig/gcp"
-	powervsconfig "github.com/openshift/installer/pkg/asset/installconfig/powervs"
-	"github.com/openshift/installer/pkg/types/alibabacloud"
 	"github.com/openshift/installer/pkg/types/aws"
 	"github.com/openshift/installer/pkg/types/azure"
 	"github.com/openshift/installer/pkg/types/baremetal"
+	"github.com/openshift/installer/pkg/types/external"
 	"github.com/openshift/installer/pkg/types/gcp"
 	"github.com/openshift/installer/pkg/types/ibmcloud"
-	"github.com/openshift/installer/pkg/types/libvirt"
 	"github.com/openshift/installer/pkg/types/none"
 	"github.com/openshift/installer/pkg/types/nutanix"
 	"github.com/openshift/installer/pkg/types/openstack"
@@ -40,35 +39,21 @@ func (a *PlatformPermsCheck) Dependencies() []asset.Asset {
 }
 
 // Generate queries for input from the user.
-func (a *PlatformPermsCheck) Generate(dependencies asset.Parents) error {
-	ctx := context.TODO()
+func (a *PlatformPermsCheck) Generate(ctx context.Context, dependencies asset.Parents) error {
 	ic := &InstallConfig{}
 	dependencies.Get(ic)
 
 	if ic.Config.CredentialsMode != "" {
+		logrus.Debug("CredentialsMode is set. Skipping platform permissions checks before attempting installation.")
 		return nil
 	}
+	logrus.Debug("CredentialsMode is not set. Performing platform permissions checks before attempting installation.")
 
 	var err error
 	platform := ic.Config.Platform.Name()
 	switch platform {
 	case aws.Name:
-		permissionGroups := []awsconfig.PermissionGroup{awsconfig.PermissionCreateBase}
-		usingExistingVPC := len(ic.Config.AWS.Subnets) != 0
-
-		if !usingExistingVPC {
-			permissionGroups = append(permissionGroups, awsconfig.PermissionCreateNetworking)
-		}
-
-		// Add delete permissions for non-C2S installs.
-		if !aws.IsSecretRegion(ic.Config.AWS.Region) {
-			permissionGroups = append(permissionGroups, awsconfig.PermissionDeleteBase)
-			if usingExistingVPC {
-				permissionGroups = append(permissionGroups, awsconfig.PermissionDeleteSharedNetworking)
-			} else {
-				permissionGroups = append(permissionGroups, awsconfig.PermissionDeleteNetworking)
-			}
-		}
+		permissionGroups := awsconfig.RequiredPermissionGroups(ic.Config)
 
 		ssn, err := ic.AWS.Session(ctx)
 		if err != nil {
@@ -80,7 +65,7 @@ func (a *PlatformPermsCheck) Generate(dependencies asset.Parents) error {
 			return errors.Wrap(err, "validate AWS credentials")
 		}
 	case gcp.Name:
-		client, err := gcpconfig.NewClient(context.TODO())
+		client, err := gcpconfig.NewClient(ctx, ic.Config.GCP.ServiceEndpoints)
 		if err != nil {
 			return err
 		}
@@ -91,15 +76,8 @@ func (a *PlatformPermsCheck) Generate(dependencies asset.Parents) error {
 	case ibmcloud.Name:
 		// TODO: IBM[#90]: platformpermscheck
 	case powervs.Name:
-		bxCli, err := powervsconfig.NewBxClient()
-		if err != nil {
-			return err
-		}
-		err = bxCli.ValidateAccountPermissions()
-		if err != nil {
-			return err
-		}
-	case azure.Name, baremetal.Name, libvirt.Name, none.Name, openstack.Name, ovirt.Name, vsphere.Name, alibabacloud.Name, nutanix.Name:
+		// Nothing needs to be done here
+	case azure.Name, baremetal.Name, external.Name, none.Name, openstack.Name, ovirt.Name, vsphere.Name, nutanix.Name:
 		// no permissions to check
 	default:
 		err = fmt.Errorf("unknown platform type %q", platform)

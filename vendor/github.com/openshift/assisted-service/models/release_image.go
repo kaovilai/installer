@@ -13,6 +13,7 @@ import (
 	"github.com/go-openapi/strfmt"
 	"github.com/go-openapi/swag"
 	"github.com/go-openapi/validate"
+	"github.com/lib/pq"
 )
 
 // ReleaseImage release image
@@ -22,10 +23,11 @@ type ReleaseImage struct {
 
 	// (DEPRECATED) The CPU architecture of the image (x86_64/arm64/etc).
 	// Required: true
+	// Enum: [x86_64 aarch64 arm64 ppc64le s390x multi]
 	CPUArchitecture *string `json:"cpu_architecture" gorm:"default:'x86_64'"`
 
 	// List of CPU architectures provided by the image.
-	CPUArchitectures []string `json:"cpu_architectures"`
+	CPUArchitectures pq.StringArray `json:"cpu_architectures" gorm:"type:text[]"`
 
 	// Indication that the version is the recommended one.
 	Default bool `json:"default,omitempty"`
@@ -35,12 +37,12 @@ type ReleaseImage struct {
 	OpenshiftVersion *string `json:"openshift_version"`
 
 	// Level of support of the version.
-	// Enum: [beta production maintenance]
+	// Enum: [beta production maintenance end-of-life]
 	SupportLevel string `json:"support_level,omitempty"`
 
 	// The installation image of the OpenShift cluster.
 	// Required: true
-	URL *string `json:"url"`
+	URL *string `json:"url" gorm:"primarykey"`
 
 	// OCP version from the release metadata.
 	// Required: true
@@ -77,9 +79,55 @@ func (m *ReleaseImage) Validate(formats strfmt.Registry) error {
 	return nil
 }
 
+var releaseImageTypeCPUArchitecturePropEnum []interface{}
+
+func init() {
+	var res []string
+	if err := json.Unmarshal([]byte(`["x86_64","aarch64","arm64","ppc64le","s390x","multi"]`), &res); err != nil {
+		panic(err)
+	}
+	for _, v := range res {
+		releaseImageTypeCPUArchitecturePropEnum = append(releaseImageTypeCPUArchitecturePropEnum, v)
+	}
+}
+
+const (
+
+	// ReleaseImageCPUArchitectureX8664 captures enum value "x86_64"
+	ReleaseImageCPUArchitectureX8664 string = "x86_64"
+
+	// ReleaseImageCPUArchitectureAarch64 captures enum value "aarch64"
+	ReleaseImageCPUArchitectureAarch64 string = "aarch64"
+
+	// ReleaseImageCPUArchitectureArm64 captures enum value "arm64"
+	ReleaseImageCPUArchitectureArm64 string = "arm64"
+
+	// ReleaseImageCPUArchitecturePpc64le captures enum value "ppc64le"
+	ReleaseImageCPUArchitecturePpc64le string = "ppc64le"
+
+	// ReleaseImageCPUArchitectureS390x captures enum value "s390x"
+	ReleaseImageCPUArchitectureS390x string = "s390x"
+
+	// ReleaseImageCPUArchitectureMulti captures enum value "multi"
+	ReleaseImageCPUArchitectureMulti string = "multi"
+)
+
+// prop value enum
+func (m *ReleaseImage) validateCPUArchitectureEnum(path, location string, value string) error {
+	if err := validate.EnumCase(path, location, value, releaseImageTypeCPUArchitecturePropEnum, true); err != nil {
+		return err
+	}
+	return nil
+}
+
 func (m *ReleaseImage) validateCPUArchitecture(formats strfmt.Registry) error {
 
 	if err := validate.Required("cpu_architecture", "body", m.CPUArchitecture); err != nil {
+		return err
+	}
+
+	// value enum
+	if err := m.validateCPUArchitectureEnum("cpu_architecture", "body", *m.CPUArchitecture); err != nil {
 		return err
 	}
 
@@ -99,7 +147,7 @@ var releaseImageTypeSupportLevelPropEnum []interface{}
 
 func init() {
 	var res []string
-	if err := json.Unmarshal([]byte(`["beta","production","maintenance"]`), &res); err != nil {
+	if err := json.Unmarshal([]byte(`["beta","production","maintenance","end-of-life"]`), &res); err != nil {
 		panic(err)
 	}
 	for _, v := range res {
@@ -117,6 +165,9 @@ const (
 
 	// ReleaseImageSupportLevelMaintenance captures enum value "maintenance"
 	ReleaseImageSupportLevelMaintenance string = "maintenance"
+
+	// ReleaseImageSupportLevelEndOfLife captures enum value "end-of-life"
+	ReleaseImageSupportLevelEndOfLife string = "end-of-life"
 )
 
 // prop value enum

@@ -4,9 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/pkg/errors"
-
 	machineapi "github.com/openshift/api/machine/v1beta1"
+	gcpconsts "github.com/openshift/installer/pkg/constants/gcp"
 	"github.com/openshift/installer/pkg/types"
 )
 
@@ -23,43 +22,49 @@ type Auth struct {
 
 type config struct {
 	Auth                      `json:",inline"`
-	Region                    string   `json:"gcp_region,omitempty"`
-	BootstrapInstanceType     string   `json:"gcp_bootstrap_instance_type,omitempty"`
-	CreateBootstrapSA         bool     `json:"gcp_create_bootstrap_sa"`
-	CreateFirewallRules       bool     `json:"gcp_create_firewall_rules"`
-	MasterInstanceType        string   `json:"gcp_master_instance_type,omitempty"`
-	MasterAvailabilityZones   []string `json:"gcp_master_availability_zones"`
-	ImageURI                  string   `json:"gcp_image_uri,omitempty"`
-	Image                     string   `json:"gcp_image,omitempty"`
-	PreexistingImage          bool     `json:"gcp_preexisting_image"`
-	InstanceServiceAccount    string   `json:"gcp_instance_service_account,omitempty"`
-	ImageLicenses             []string `json:"gcp_image_licenses,omitempty"`
-	VolumeType                string   `json:"gcp_master_root_volume_type"`
-	VolumeSize                int64    `json:"gcp_master_root_volume_size"`
-	VolumeKMSKeyLink          string   `json:"gcp_root_volume_kms_key_link"`
-	PublicZoneName            string   `json:"gcp_public_zone_name,omitempty"`
-	PublishStrategy           string   `json:"gcp_publish_strategy,omitempty"`
-	PreexistingNetwork        bool     `json:"gcp_preexisting_network,omitempty"`
-	ClusterNetwork            string   `json:"gcp_cluster_network,omitempty"`
-	ControlPlaneSubnet        string   `json:"gcp_control_plane_subnet,omitempty"`
-	ComputeSubnet             string   `json:"gcp_compute_subnet,omitempty"`
-	ControlPlaneTags          []string `json:"gcp_control_plane_tags,omitempty"`
-	SecureBoot                string   `json:"gcp_master_secure_boot,omitempty"`
-	OnHostMaintenance         string   `json:"gcp_master_on_host_maintenance,omitempty"`
-	EnableConfidentialCompute string   `json:"gcp_master_confidential_compute,omitempty"`
+	Region                    string            `json:"gcp_region,omitempty"`
+	BootstrapInstanceType     string            `json:"gcp_bootstrap_instance_type,omitempty"`
+	CreateFirewallRules       bool              `json:"gcp_create_firewall_rules"`
+	MasterInstanceType        string            `json:"gcp_master_instance_type,omitempty"`
+	MasterAvailabilityZones   []string          `json:"gcp_master_availability_zones"`
+	Image                     string            `json:"gcp_image,omitempty"`
+	InstanceServiceAccount    string            `json:"gcp_instance_service_account,omitempty"`
+	VolumeType                string            `json:"gcp_master_root_volume_type"`
+	VolumeSize                int64             `json:"gcp_master_root_volume_size"`
+	VolumeKMSKeyLink          string            `json:"gcp_root_volume_kms_key_link"`
+	PublicZoneName            string            `json:"gcp_public_zone_name,omitempty"`
+	PrivateZoneName           string            `json:"gcp_private_zone_name,omitempty"`
+	PublishStrategy           string            `json:"gcp_publish_strategy,omitempty"`
+	PreexistingNetwork        bool              `json:"gcp_preexisting_network,omitempty"`
+	ClusterNetwork            string            `json:"gcp_cluster_network,omitempty"`
+	ControlPlaneSubnet        string            `json:"gcp_control_plane_subnet,omitempty"`
+	ComputeSubnet             string            `json:"gcp_compute_subnet,omitempty"`
+	ControlPlaneTags          []string          `json:"gcp_control_plane_tags,omitempty"`
+	SecureBoot                string            `json:"gcp_master_secure_boot,omitempty"`
+	OnHostMaintenance         string            `json:"gcp_master_on_host_maintenance,omitempty"`
+	EnableConfidentialCompute string            `json:"gcp_master_confidential_compute,omitempty"`
+	ExtraLabels               map[string]string `json:"gcp_extra_labels,omitempty"`
+	UserProvisionedDNS        bool              `json:"gcp_user_provisioned_dns,omitempty"`
+	ExtraTags                 map[string]string `json:"gcp_extra_tags,omitempty"`
+	IgnitionShim              string            `json:"gcp_ignition_shim,omitempty"`
+	PresignedURL              string            `json:"gcp_signed_url"`
 }
 
 // TFVarsSources contains the parameters to be converted into Terraform variables
 type TFVarsSources struct {
 	Auth                Auth
 	CreateFirewallRules bool
-	ImageURI            string
-	ImageLicenses       []string
 	MasterConfigs       []*machineapi.GCPMachineProviderSpec
 	WorkerConfigs       []*machineapi.GCPMachineProviderSpec
 	PublicZoneName      string
+	PrivateZoneName     string
 	PublishStrategy     types.PublishingStrategy
 	PreexistingNetwork  bool
+	InfrastructureName  string
+	UserProvisionedDNS  bool
+	UserTags            map[string]string
+	IgnitionShim        string
+	PresignedURL        string
 }
 
 // TFVars generates gcp-specific Terraform variables launching the cluster.
@@ -71,6 +76,13 @@ func TFVars(sources TFVarsSources) ([]byte, error) {
 		masterAvailabilityZones[i] = c.Zone
 	}
 
+	labels := make(map[string]string, len(masterConfig.Labels)+1)
+	// add OCP default label
+	labels[fmt.Sprintf(gcpconsts.ClusterIDLabelFmt, sources.InfrastructureName)] = "owned"
+	for k, v := range masterConfig.Labels {
+		labels[k] = v
+	}
+
 	cfg := &config{
 		Auth:                      sources.Auth,
 		Region:                    masterConfig.Region,
@@ -80,10 +92,9 @@ func TFVars(sources TFVarsSources) ([]byte, error) {
 		MasterAvailabilityZones:   masterAvailabilityZones,
 		VolumeType:                masterConfig.Disks[0].Type,
 		VolumeSize:                masterConfig.Disks[0].SizeGB,
-		ImageURI:                  sources.ImageURI,
 		Image:                     masterConfig.Disks[0].Image,
-		ImageLicenses:             sources.ImageLicenses,
 		PublicZoneName:            sources.PublicZoneName,
+		PrivateZoneName:           sources.PrivateZoneName,
 		PublishStrategy:           string(sources.PublishStrategy),
 		ClusterNetwork:            masterConfig.NetworkInterfaces[0].Network,
 		ControlPlaneSubnet:        masterConfig.NetworkInterfaces[0].Subnetwork,
@@ -93,38 +104,25 @@ func TFVars(sources TFVarsSources) ([]byte, error) {
 		SecureBoot:                string(masterConfig.ShieldedInstanceConfig.SecureBoot),
 		EnableConfidentialCompute: string(masterConfig.ConfidentialCompute),
 		OnHostMaintenance:         string(masterConfig.OnHostMaintenance),
-	}
-
-	cfg.PreexistingImage = true
-	if len(sources.ImageLicenses) > 0 {
-		cfg.PreexistingImage = false
+		ExtraLabels:               labels,
+		UserProvisionedDNS:        sources.UserProvisionedDNS,
+		ExtraTags:                 sources.UserTags,
+		IgnitionShim:              sources.IgnitionShim,
+		PresignedURL:              sources.PresignedURL,
 	}
 
 	if masterConfig.Disks[0].EncryptionKey != nil {
 		cfg.VolumeKMSKeyLink = generateDiskEncryptionKeyLink(masterConfig.Disks[0].EncryptionKey, masterConfig.ProjectID)
 	}
 
-	serviceAccount := make(map[string]interface{})
-
-	if err := json.Unmarshal([]byte(cfg.Auth.ServiceAccount), &serviceAccount); len(cfg.Auth.ServiceAccount) > 0 && err != nil {
-		return nil, errors.Wrapf(err, "unmarshaling service account")
-	}
-
 	instanceServiceAccount := ""
-	// Passthrough service accounts are only needed for GCP XPN.
+	// Service Account for masters set for xpn installs
 	if len(cfg.Auth.NetworkProjectID) > 0 {
-		var found bool
-		instanceServiceAccount, found = serviceAccount["client_email"].(string)
-		if !found {
-			return nil, errors.New("could not find google service account")
+		if len(masterConfig.ServiceAccounts) > 0 {
+			instanceServiceAccount = masterConfig.ServiceAccounts[0].Email
 		}
 	}
 	cfg.InstanceServiceAccount = instanceServiceAccount
-
-	// A private key is needed to sign the URL for bootstrap ignition.
-	// If there is no key in the credentials, we need to generate a new SA.
-	_, foundKey := serviceAccount["private_key"]
-	cfg.CreateBootstrapSA = !foundKey
 
 	return json.MarshalIndent(cfg, "", "  ")
 }

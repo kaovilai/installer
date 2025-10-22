@@ -1,6 +1,8 @@
 package validation
 
 import (
+	"context"
+	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
@@ -10,11 +12,54 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 
+	powervsconfig "github.com/openshift/installer/pkg/asset/installconfig/powervs"
 	"github.com/openshift/installer/pkg/types/powervs"
 )
 
+var validSMTLevels = sets.New[string]("1", "2", "3", "4", "5", "6", "7", "8", "on", "off")
+
+func validateSysType(platform *powervs.Platform, p *powervs.MachinePool, fldPath *field.Path, allErrs field.ErrorList) field.ErrorList {
+	var (
+		client        *powervsconfig.Client
+		fallback      = false
+		availableOnes []string
+		availableOne  string
+		found         = false
+		err           error
+	)
+
+	client, err = powervsconfig.NewClient()
+	if err != nil {
+		fallback = true
+	} else {
+		availableOnes, err = client.GetDatacenterSupportedSystems(context.Background(), platform.Zone)
+		if err != nil {
+			fallback = true
+		} else {
+			for _, availableOne = range availableOnes {
+				if p.SysType == availableOne {
+					found = true
+				}
+			}
+			if !found {
+				msg := fmt.Sprintf("unknown system type specified. supported ones are %v", availableOnes)
+				allErrs = append(allErrs, field.Invalid(fldPath.Child("sysType"), p.SysType, msg))
+			}
+		}
+	}
+
+	if fallback {
+		// Fallback to hardcoded list
+		if !powervs.AllKnownSysTypes().Has(p.SysType) {
+			allErrs = append(allErrs, field.Invalid(fldPath.Child("sysType"), p.SysType, "unknown system type specified"))
+		}
+	}
+
+	return allErrs
+}
+
 // ValidateMachinePool checks that the specified machine pool is valid.
-func ValidateMachinePool(p *powervs.MachinePool, fldPath *field.Path) field.ErrorList {
+func ValidateMachinePool(platform *powervs.Platform, p *powervs.MachinePool, fldPath *field.Path) field.ErrorList {
 	allErrs := field.ErrorList{}
 
 	// Validate VolumeIDs
@@ -70,13 +115,14 @@ func ValidateMachinePool(p *powervs.MachinePool, fldPath *field.Path) field.Erro
 		}
 	}
 
+	// Validate SMTLevel
+	if p.SMTLevel != "" && !validSMTLevels.Has(p.SMTLevel) {
+		allErrs = append(allErrs, field.Invalid(fldPath.Child("smtLevel"), p.SMTLevel, fmt.Sprintf("Valid SMT Levels are %s", sets.List(validSMTLevels))))
+	}
+
 	// Validate SysType
 	if p.SysType != "" {
-		const sysTypeRegex = `^(?:e980|s922(-.*|))$`
-		// Allowing for a staging-only pattern of s922-* but not exposing here
-		if !regexp.MustCompile(sysTypeRegex).MatchString(p.SysType) {
-			allErrs = append(allErrs, field.Invalid(fldPath.Child("sysType"), p.SysType, "system type must be one of {e980,s922}"))
-		}
+		allErrs = validateSysType(platform, p, fldPath, allErrs)
 	}
 
 	// Validate for Maximum Memory and Processors limits

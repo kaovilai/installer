@@ -2,10 +2,13 @@ package installconfig
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
+	"k8s.io/apimachinery/pkg/util/validation/field"
+
+	configv1 "github.com/openshift/api/config/v1"
 	"github.com/openshift/installer/pkg/asset"
-	alibabacloudconfig "github.com/openshift/installer/pkg/asset/installconfig/alibabacloud"
 	awsconfig "github.com/openshift/installer/pkg/asset/installconfig/aws"
 	azconfig "github.com/openshift/installer/pkg/asset/installconfig/azure"
 	bmconfig "github.com/openshift/installer/pkg/asset/installconfig/baremetal"
@@ -16,13 +19,13 @@ import (
 	ovirtconfig "github.com/openshift/installer/pkg/asset/installconfig/ovirt"
 	powervsconfig "github.com/openshift/installer/pkg/asset/installconfig/powervs"
 	vsconfig "github.com/openshift/installer/pkg/asset/installconfig/vsphere"
-	"github.com/openshift/installer/pkg/types/alibabacloud"
 	"github.com/openshift/installer/pkg/types/aws"
 	"github.com/openshift/installer/pkg/types/azure"
 	"github.com/openshift/installer/pkg/types/baremetal"
+	baremetalvalidation "github.com/openshift/installer/pkg/types/baremetal/validation"
+	"github.com/openshift/installer/pkg/types/external"
 	"github.com/openshift/installer/pkg/types/gcp"
 	"github.com/openshift/installer/pkg/types/ibmcloud"
-	"github.com/openshift/installer/pkg/types/libvirt"
 	"github.com/openshift/installer/pkg/types/none"
 	"github.com/openshift/installer/pkg/types/nutanix"
 	"github.com/openshift/installer/pkg/types/openstack"
@@ -46,13 +49,22 @@ func (a *PlatformProvisionCheck) Dependencies() []asset.Asset {
 }
 
 // Generate queries for input from the user.
-func (a *PlatformProvisionCheck) Generate(dependencies asset.Parents) error {
+//
+//nolint:gocyclo
+func (a *PlatformProvisionCheck) Generate(ctx context.Context, dependencies asset.Parents) error {
 	ic := &InstallConfig{}
 	dependencies.Get(ic)
 	platform := ic.Config.Platform.Name()
+
+	// IPI requires MachineAPI capability
+	enabledCaps := ic.Config.GetEnabledCapabilities()
+	if !enabledCaps.Has(configv1.ClusterVersionCapabilityMachineAPI) {
+		return errors.New("IPI requires MachineAPI capability")
+	}
+
 	switch platform {
 	case aws.Name:
-		session, err := ic.AWS.Session(context.TODO())
+		session, err := ic.AWS.Session(ctx)
 		if err != nil {
 			return err
 		}
@@ -85,21 +97,23 @@ func (a *PlatformProvisionCheck) Generate(dependencies asset.Parents) error {
 		if err != nil {
 			return err
 		}
-	case gcp.Name:
-		client, err := gcpconfig.NewClient(context.TODO())
+		err = baremetalvalidation.ValidateHosts(ic.Config.BareMetal, field.NewPath("platform"), ic.Config).ToAggregate()
 		if err != nil {
 			return err
 		}
-		err = gcpconfig.ValidatePreExistingPublicDNS(client, ic.Config)
+
+	case gcp.Name:
+		err := gcpconfig.ValidateForProvisioning(ic.Config)
 		if err != nil {
 			return err
 		}
 	case ibmcloud.Name:
-		client, err := ibmcloudconfig.NewClient()
+		client, err := ibmcloudconfig.NewClient(ic.Config.Platform.IBMCloud.ServiceEndpoints)
 		if err != nil {
 			return err
 		}
-		err = ibmcloudconfig.ValidatePreExistingPublicDNS(client, ic.Config, ic.IBMCloud)
+		metadata := ibmcloudconfig.NewMetadata(ic.Config)
+		err = ibmcloudconfig.ValidatePreExistingPublicDNS(client, ic.Config, metadata)
 		if err != nil {
 			return err
 		}
@@ -117,29 +131,47 @@ func (a *PlatformProvisionCheck) Generate(dependencies asset.Parents) error {
 		if err != nil {
 			return err
 		}
-	case alibabacloud.Name:
-		client, err := ic.AlibabaCloud.Client()
-		if err != nil {
-			return err
-		}
-		err = alibabacloudconfig.ValidateForProvisioning(client, ic.Config, ic.AlibabaCloud)
-		if err != nil {
-			return err
-		}
 	case powervs.Name:
 		client, err := powervsconfig.NewClient()
 		if err != nil {
 			return err
 		}
+
+		err = powervsconfig.ValidatePERAvailability(client, ic.Config)
+		if err != nil {
+			return err
+		}
+
 		err = powervsconfig.ValidatePreExistingDNS(client, ic.Config, ic.PowerVS)
 		if err != nil {
 			return err
 		}
+
 		err = powervsconfig.ValidateCustomVPCSetup(client, ic.Config)
 		if err != nil {
 			return err
 		}
-	case libvirt.Name, none.Name:
+
+		err = powervsconfig.ValidateResourceGroup(client, ic.Config)
+		if err != nil {
+			return err
+		}
+
+		err = powervsconfig.ValidateSystemTypeForZone(client, ic.Config)
+		if err != nil {
+			return err
+		}
+
+		err = powervsconfig.ValidateServiceInstance(client, ic.Config)
+		if err != nil {
+			return err
+		}
+
+		err = powervsconfig.ValidateTransitGateway(client, ic.Config)
+		if err != nil {
+			return err
+		}
+	case external.Name, none.Name:
 		// no special provisioning requirements to check
 	case nutanix.Name:
 		err := nutanixconfig.ValidateForProvisioning(ic.Config)

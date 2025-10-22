@@ -4,11 +4,11 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"net/http"
 	"net/url"
@@ -18,6 +18,7 @@ import (
 	"github.com/PaesslerAG/jsonpath"
 	"github.com/go-logr/logr"
 	"github.com/go-logr/zapr"
+	"github.com/hashicorp/go-cleanhttp"
 	"go.uber.org/zap"
 
 	"github.com/nutanix-cloud-native/prism-go-client"
@@ -62,7 +63,8 @@ type Client struct {
 	// error message, incase httpClient is in error state
 	ErrorMsg string
 
-	logger *logr.Logger
+	logger   *logr.Logger
+	certpool *x509.CertPool
 }
 
 type ClientOption func(*Client) error
@@ -79,6 +81,25 @@ func WithLogger(logger *logr.Logger) ClientOption {
 func WithCredentials(credentials *prismgoclient.Credentials) ClientOption {
 	return func(c *Client) error {
 		c.credentials = credentials
+		if c.credentials.Insecure {
+			transport, ok := c.httpClient.Transport.(*http.Transport)
+			if !ok {
+				return fmt.Errorf("transport is not of type http.Transport: %T", c.httpClient.Transport)
+			}
+			transport.TLSClientConfig.InsecureSkipVerify = true
+		}
+		if c.credentials.ProxyURL != "" {
+			c.logger.V(1).Info("Using proxy:", "proxy", c.credentials.ProxyURL)
+			proxy, err := url.Parse(c.credentials.ProxyURL)
+			if err != nil {
+				return fmt.Errorf("error parsing proxy url: %s", err)
+			}
+			transport, ok := c.httpClient.Transport.(*http.Transport)
+			if !ok {
+				return fmt.Errorf("transport is not of type http.Transport: %T", c.httpClient.Transport)
+			}
+			transport.Proxy = http.ProxyURL(proxy)
+		}
 		return nil
 	}
 }
@@ -129,25 +150,57 @@ func WithAbsolutePath(absolutePath string) ClientOption {
 	}
 }
 
+// WithCertificate adds the certificate to the certificate pool in tls config
+func WithCertificate(cert *x509.Certificate) ClientOption {
+	return func(c *Client) error {
+		if cert == nil {
+			return fmt.Errorf("certificate is nil")
+		}
+		c.certpool.AddCert(cert)
+		return nil
+	}
+}
+
+// WithRoundTripper overrides the transport for the httpClient
+// Overriding transport is useful for testing against API Mocks
+// This is not recommended for production use
+func WithRoundTripper(transport http.RoundTripper) ClientOption {
+	return func(c *Client) error {
+		c.httpClient.Transport = transport
+		return nil
+	}
+}
+
 // NewClient returns a wrapper around http/https (as per isHTTP flag) httpClient with additions of proxy & session_auth if given
 func NewClient(opts ...ClientOption) (*Client, error) {
 	c := &Client{
-		httpClient: http.DefaultClient,
+		httpClient: cleanhttp.DefaultClient(),
 	}
+
+	certPool, err := x509.SystemCertPool()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get system cert pool: %s", err)
+	}
+	c.certpool = certPool
+
+	c.httpClient.Transport = http.DefaultTransport
+	c.httpClient.Transport.(*http.Transport).TLSClientConfig = &tls.Config{}
+	c.httpClient.Transport.(*http.Transport).TLSClientConfig.RootCAs = c.certpool
+
+	// If the user does not specify a logger, then we'll use zap for a default one
+	// If the user specified a logger, then we'll use that logger
+	zapLog, err := zap.NewProduction()
+	if err != nil {
+		return nil, err
+	}
+
+	logger := zapr.NewLogger(zapLog)
+	c.logger = &logger
+
 	for _, opt := range opts {
 		if err := opt(c); err != nil {
 			return nil, err
 		}
-	}
-
-	// If the user does not specify a logger, then we'll use zap for a default one
-	if c.logger == nil {
-		zapLog, err := zap.NewProduction()
-		if err != nil {
-			return nil, err
-		}
-		logger := zapr.NewLogger(zapLog)
-		c.logger = &logger
 	}
 
 	if c.UserAgent == "" {
@@ -166,41 +219,11 @@ func NewClient(opts ...ClientOption) (*Client, error) {
 		}
 	}
 
-	transCfg := &http.Transport{
-		// to skip/unskip SSL certificate validation
-		TLSClientConfig: &tls.Config{
-			InsecureSkipVerify: c.credentials.Insecure,
-		},
-	}
-	if c.credentials.ProxyURL != "" {
-		c.logger.V(1).Info("Using proxy:", "proxy", c.credentials.ProxyURL)
-		proxy, err := url.Parse(c.credentials.ProxyURL)
-		if err != nil {
-			return nil, fmt.Errorf("error parsing proxy url: %s", err)
-		}
-		transCfg.Proxy = http.ProxyURL(proxy)
-	}
-	c.httpClient.Transport = transCfg
-
 	if c.credentials.SessionAuth {
 		c.logger.V(1).Info("Using session_auth")
-
-		req, err := c.NewRequest(http.MethodGet, "/users/me", nil)
-		if err != nil {
+		if err := c.refreshCookies(context.Background()); err != nil {
 			return nil, err
 		}
-
-		resp, err := c.httpClient.Do(req)
-		if err != nil {
-			return nil, err
-		}
-		defer resp.Body.Close()
-
-		if err := CheckResponse(resp); err != nil {
-			return nil, err
-		}
-
-		c.cookies = resp.Cookies()
 	}
 
 	return c, nil
@@ -208,43 +231,57 @@ func NewClient(opts ...ClientOption) (*Client, error) {
 
 // NewRequest creates a request
 func (c *Client) NewRequest(method, urlStr string, body interface{}) (*http.Request, error) {
-	// check if httpClient exists or not
-	if c.httpClient == nil {
-		return nil, fmt.Errorf(c.ErrorMsg)
-	}
-
-	rel, err := url.Parse(c.absolutePath + urlStr)
+	req, err := c.NewUnAuthRequest(method, urlStr, body)
 	if err != nil {
 		return nil, err
 	}
 
-	u := c.BaseURL.ResolveReference(rel)
-
-	buf := new(bytes.Buffer)
-
-	if body != nil {
-		err := json.NewEncoder(buf).Encode(body)
-		if err != nil {
-			return nil, err
-		}
-	}
-	req, err := http.NewRequest(method, u.String(), buf)
-	if err != nil {
-		return nil, err
-	}
-
-	req.Header.Add("Content-Type", mediaType)
-	req.Header.Add("Accept", mediaType)
-	req.Header.Add("User-Agent", c.UserAgent)
 	if c.cookies != nil {
-		for _, i := range c.cookies {
-			req.AddCookie(i)
-		}
+		decorateRequestWithCookies(req, c.cookies)
 	} else {
-		req.Header.Add("Authorization", "Basic "+
-			base64.StdEncoding.EncodeToString([]byte(c.credentials.Username+":"+c.credentials.Password)))
+		decorateRequestWithBasicAuthHeaders(req, c.credentials.Username, c.credentials.Password)
 	}
+
 	return req, nil
+}
+
+func (c *Client) refreshCookies(ctx context.Context) error {
+	req, err := c.NewUnAuthRequest(http.MethodGet, "/users/me", nil)
+	if err != nil {
+		return err
+	}
+
+	req = req.WithContext(ctx)
+	decorateRequestWithBasicAuthHeaders(req, c.credentials.Username, c.credentials.Password)
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+
+	defer resp.Body.Close()
+
+	if err := CheckResponse(resp); err != nil {
+		return err
+	}
+
+	c.cookies = resp.Cookies()
+
+	return nil
+}
+
+func decorateRequestWithBasicAuthHeaders(req *http.Request, username, password string) {
+	req.Header.Add("Authorization",
+		"Basic "+base64.StdEncoding.EncodeToString([]byte(username+":"+password)))
+}
+
+func decorateRequestWithCookies(req *http.Request, cookies []*http.Cookie) {
+	for _, cookie := range cookies {
+		req.AddCookie(cookie)
+	}
+}
+
+func clearCookiesInRequest(req *http.Request) {
+	req.Header.Del("Cookie")
 }
 
 // NewUnAuthRequest creates a request without authorisation headers
@@ -259,15 +296,17 @@ func (c *Client) NewUnAuthRequest(method, urlStr string, body interface{}) (*htt
 	if err != nil {
 		return nil, err
 	}
+
 	u := c.BaseURL.ResolveReference(rel)
 
 	buf := new(bytes.Buffer)
 	if body != nil {
-		er := json.NewEncoder(buf).Encode(body)
+		err := json.NewEncoder(buf).Encode(body)
 		if err != nil {
-			return nil, er
+			return nil, err
 		}
 	}
+
 	req, err := http.NewRequest(method, u.String(), buf)
 	if err != nil {
 		return nil, err
@@ -394,50 +433,68 @@ func (c *Client) OnRequestCompleted(rc RequestCompletionCallback) {
 	c.onRequestCompleted = rc
 }
 
-// Do performs request passed
-func (c *Client) Do(ctx context.Context, req *http.Request, v interface{}) error {
-	// check if httpClient exists or not
-	if c.httpClient == nil {
-		return fmt.Errorf(c.ErrorMsg)
-	}
+func (c *Client) clearCookies() {
+	c.cookies = nil
+}
 
+// do will perform the request and handle retries. This is a recursive function
+// that will retry the request if the response is a 401 and the client is configured
+// to use session authentication. It will retry up to maxRetries times.
+// do performs the request and handles retries. It is not exported.
+func (c *Client) do(ctx context.Context, req *http.Request, v interface{}, retryCount int, maxRetries int) error {
 	req = req.WithContext(ctx)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return err
 	}
 
-	defer func() {
-		if rerr := resp.Body.Close(); err == nil {
-			err = rerr
+	defer resp.Body.Close()
+
+	if err := CheckResponse(resp); err != nil {
+		if resp.StatusCode == http.StatusUnauthorized && retryCount < maxRetries {
+			c.clearCookies()
+			if err := c.refreshCookies(ctx); err != nil {
+				return err
+			}
+			clearCookiesInRequest(req)
+			decorateRequestWithCookies(req, c.cookies)
+			return c.do(ctx, req, v, retryCount+1, maxRetries)
 		}
-	}()
-
-	err = CheckResponse(resp)
-
-	if err != nil {
 		return err
 	}
 
 	if v != nil {
 		if w, ok := v.(io.Writer); ok {
 			_, err = io.Copy(w, resp.Body)
-			if err != nil {
-				fmt.Printf("Error io.Copy %s", err)
-				return err
-			}
 		} else {
 			err = json.NewDecoder(resp.Body).Decode(v)
-			if err != nil {
-				return fmt.Errorf("error unmarshalling json: %s", err)
-			}
+		}
+		if err != nil {
+			return fmt.Errorf("error unmarshalling json: %s", err)
 		}
 	}
 
 	if c.onRequestCompleted != nil {
 		c.onRequestCompleted(req, resp, v)
 	}
-	return err
+	return nil
+}
+
+// Do performs request passed
+func (c *Client) Do(ctx context.Context, req *http.Request, v interface{}) error {
+	noRetries := 0
+	retryOnce := 1
+
+	// It's recommend that the clients use session-auth cookies instead of basic auth for requests to Prism Central
+	// where possible. Session tokens are alive for 15m and then replaced. The session-auth handling mechanism in
+	// the client should be resilient to session token refresh. As long the credentials are accurate and session
+	// auth mechanism is in play, the client upon receiving the first 401 should refresh the session cookie and
+	// retry the request. Only if the requests fails the second time, should the client return a 401 back to the caller.
+	if c.credentials.SessionAuth {
+		return c.do(ctx, req, v, noRetries, retryOnce)
+	}
+
+	return c.do(ctx, req, v, noRetries, noRetries)
 }
 
 func searchSlice(slice []string, key string) bool {
@@ -467,8 +524,7 @@ func (c *Client) DoWithFilters(ctx context.Context, req *http.Request, v interfa
 		}
 	}()
 
-	err = CheckResponse(resp)
-	if err != nil {
+	if err := CheckResponse(resp); err != nil {
 		return err
 	}
 
@@ -583,12 +639,12 @@ func CheckResponse(r *http.Response) error {
 		return fmt.Errorf("invalid Nutanix credentials")
 	}
 
-	buf, err := ioutil.ReadAll(r.Body)
+	buf, err := io.ReadAll(r.Body)
 	if err != nil {
 		return err
 	}
 
-	rdr2 := ioutil.NopCloser(bytes.NewBuffer(buf))
+	rdr2 := io.NopCloser(bytes.NewBuffer(buf))
 
 	r.Body = rdr2
 	// if has entities -> return nil

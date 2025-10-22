@@ -3,19 +3,25 @@ package azure
 import (
 	"fmt"
 	"strings"
+
+	"github.com/openshift/installer/pkg/types/dns"
 )
 
 // aro is a setting to enable aro-only modifications
 var aro bool
 
 // OutboundType is a strategy for how egress from cluster is achieved.
-// +kubebuilder:validation:Enum="";Loadbalancer;UserDefinedRouting
+// +kubebuilder:validation:Enum="";Loadbalancer;NATGatewaySingleZone;UserDefinedRouting
 type OutboundType string
 
 const (
 	// LoadbalancerOutboundType uses Standard loadbalancer for egress from the cluster.
 	// see https://docs.microsoft.com/en-us/azure/load-balancer/load-balancer-outbound-connections#lb
 	LoadbalancerOutboundType OutboundType = "Loadbalancer"
+
+	// NATGatewaySingleZoneOutboundType uses a single (non-zone-resilient) NAT Gateway for compute node outbound access.
+	// see https://learn.microsoft.com/en-us/azure/virtual-network/nat-gateway/nat-gateway-resource
+	NATGatewaySingleZoneOutboundType OutboundType = "NATGatewaySingleZone"
 
 	// UserDefinedRoutingOutboundType uses user defined routing for egress from the cluster.
 	// see https://docs.microsoft.com/en-us/azure/virtual-network/virtual-networks-udr-overview
@@ -90,10 +96,37 @@ type Platform struct {
 	// UserTags has additional keys and values that the installer will add
 	// as tags to all resources that it creates on AzurePublicCloud alone.
 	// Resources created by the cluster itself may not include these tags.
-	// This is a TechPreview feature and requires setting featureSet to
-	// TechPreviewNoUpgrade to configure the tags.
 	// +optional
 	UserTags map[string]string `json:"userTags,omitempty"`
+
+	// CustomerManagedKey has the keys needed to encrypt the storage account.
+	CustomerManagedKey *CustomerManagedKey `json:"customerManagedKey,omitempty"`
+
+	// UserProvisionedDNS indicates if the customer is providing their own DNS solution in place of the default
+	// provisioned by the Installer.
+	// +kubebuilder:default:="Disabled"
+	// +default="Disabled"
+	// +kubebuilder:validation:Enum="Enabled";"Disabled"
+	UserProvisionedDNS dns.UserProvisionedDNS `json:"userProvisionedDNS,omitempty"`
+}
+
+// KeyVault defines an Azure Key Vault.
+type KeyVault struct {
+	// ResourceGroup defines the Azure resource group used by the key
+	// vault.
+	ResourceGroup string `json:"resourceGroup"`
+	// Name is the name of the key vault.
+	Name string `json:"name"`
+	// KeyName is the name of the key vault key.
+	KeyName string `json:"keyName"`
+}
+
+// CustomerManagedKey defines the customer managed key settings for encryption of the Azure storage account.
+type CustomerManagedKey struct {
+	// KeyVault is the keyvault used for the customer created key required for encryption.
+	KeyVault KeyVault `json:"keyVault,omitempty"`
+	// UserAssignedIdentityKey is the name of the user identity that has access to the managed key.
+	UserAssignedIdentityKey string `json:"userAssignedIdentityKey,omitempty"`
 }
 
 // CloudEnvironment is the name of the Azure cloud environment
@@ -138,7 +171,46 @@ func (p *Platform) ClusterResourceGroupName(infraID string) string {
 	return fmt.Sprintf("%s-rg", infraID)
 }
 
-// IsARO returns true if ARO-only modifications are enabled
-func (p *Platform) IsARO() bool {
-	return aro
+// VirtualNetworkName returns the name of the virtual network for the cluster.
+func (p *Platform) VirtualNetworkName(infraID string) string {
+	if len(p.VirtualNetwork) > 0 {
+		return p.VirtualNetwork
+	}
+	return fmt.Sprintf("%s-vnet", infraID)
+}
+
+// ControlPlaneSubnetName returns the name of the control plane subnet for the
+// cluster.
+func (p *Platform) ControlPlaneSubnetName(infraID string) string {
+	if len(p.ControlPlaneSubnet) > 0 {
+		return p.ControlPlaneSubnet
+	}
+	return fmt.Sprintf("%s-master-subnet", infraID)
+}
+
+// ComputeSubnetName returns the name of the compute subnet for the cluster.
+func (p *Platform) ComputeSubnetName(infraID string) string {
+	if len(p.ComputeSubnet) > 0 {
+		return p.ComputeSubnet
+	}
+	return fmt.Sprintf("%s-worker-subnet", infraID)
+}
+
+// NetworkSecurityGroupName returns the name of the network security group.
+func (p *Platform) NetworkSecurityGroupName(infraID string) string {
+	return fmt.Sprintf("%s-nsg", infraID)
+}
+
+// GetStorageAccountName takes an infraID and generates a
+// storage account name, which can't be more than 24 characters.
+func GetStorageAccountName(infraID string) string {
+	storageAccountNameMax := 24
+
+	storageAccountName := strings.ReplaceAll(infraID, "-", "")
+	if len(storageAccountName) > storageAccountNameMax-2 {
+		storageAccountName = storageAccountName[:storageAccountNameMax-2]
+	}
+	storageAccountName = fmt.Sprintf("%ssa", storageAccountName)
+
+	return storageAccountName
 }

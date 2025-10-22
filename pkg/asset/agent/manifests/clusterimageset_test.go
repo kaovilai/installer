@@ -1,19 +1,22 @@
 package manifests
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"testing"
 
-	"github.com/golang/mock/gomock"
 	"github.com/pkg/errors"
 	"github.com/stretchr/testify/assert"
+	"go.uber.org/mock/gomock"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/yaml"
 
 	hivev1 "github.com/openshift/hive/apis/hive/v1"
 	"github.com/openshift/installer/pkg/asset"
 	"github.com/openshift/installer/pkg/asset/agent"
+	"github.com/openshift/installer/pkg/asset/agent/joiner"
+	"github.com/openshift/installer/pkg/asset/agent/workflow"
 	"github.com/openshift/installer/pkg/asset/mock"
 	"github.com/openshift/installer/pkg/asset/releaseimage"
 )
@@ -29,36 +32,85 @@ func TestClusterImageSet_Generate(t *testing.T) {
 		expectedConfig *hivev1.ClusterImageSet
 	}{
 		{
-			name: "missing install config",
+			name: "missing install config should still generate a ClusterImageSet with empty namespace",
 			dependencies: []asset.Asset{
+				&workflow.AgentWorkflow{Workflow: workflow.AgentWorkflowTypeInstall},
+				&joiner.ClusterInfo{},
 				&agent.OptionalInstallConfig{},
-				&releaseimage.Image{},
+				&releaseimage.Image{
+					PullSpec: currentRelease,
+				},
 			},
-			expectedError: "missing configuration or manifest file",
+			expectedConfig: &hivev1.ClusterImageSet{
+				TypeMeta: metav1.TypeMeta{
+					Kind:       "ClusterImageSet",
+					APIVersion: "hive.openshift.io/v1",
+				},
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "openshift-was not built correctly",
+				},
+				Spec: hivev1.ClusterImageSetSpec{
+					ReleaseImage: currentRelease,
+				},
+			},
 		},
 		{
 			name: "invalid ClusterImageSet configuration",
 			dependencies: []asset.Asset{
+				&workflow.AgentWorkflow{Workflow: workflow.AgentWorkflowTypeInstall},
+				&joiner.ClusterInfo{},
 				getValidOptionalInstallConfig(),
 				&releaseimage.Image{},
 			},
-			expectedError: "invalid ClusterImageSet configuration: Spec.ReleaseImage: Forbidden: value must be equal to " + currentRelease,
+			expectedError: "invalid ClusterImageSet configuration: spec.releaseImage: Invalid value: \"\": value must be equal to " + currentRelease,
 		},
 		{
 			name: "valid configuration",
 			dependencies: []asset.Asset{
+				&workflow.AgentWorkflow{Workflow: workflow.AgentWorkflowTypeInstall},
+				&joiner.ClusterInfo{},
 				getValidOptionalInstallConfig(),
 				&releaseimage.Image{
 					PullSpec: currentRelease,
 				},
 			},
 			expectedConfig: &hivev1.ClusterImageSet{
+				TypeMeta: metav1.TypeMeta{
+					Kind:       "ClusterImageSet",
+					APIVersion: "hive.openshift.io/v1",
+				},
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "openshift-was not built correctly",
-					Namespace: getObjectMetaNamespace(getValidOptionalInstallConfig()),
+					Namespace: getValidOptionalInstallConfig().ClusterNamespace(),
 				},
 				Spec: hivev1.ClusterImageSetSpec{
 					ReleaseImage: currentRelease,
+				},
+			},
+		},
+		{
+			name: "add-nodes command",
+			dependencies: []asset.Asset{
+				&workflow.AgentWorkflow{Workflow: workflow.AgentWorkflowTypeAddNodes},
+				&joiner.ClusterInfo{
+					Version:      "4.16.0",
+					ReleaseImage: "registry.ci.openshift.org/ocp/release@sha256:foo",
+					Namespace:    "agent-cluster",
+				},
+				&agent.OptionalInstallConfig{},
+				&releaseimage.Image{},
+			},
+			expectedConfig: &hivev1.ClusterImageSet{
+				TypeMeta: metav1.TypeMeta{
+					Kind:       "ClusterImageSet",
+					APIVersion: "hive.openshift.io/v1",
+				},
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "openshift-4.16.0",
+					Namespace: "agent-cluster",
+				},
+				Spec: hivev1.ClusterImageSetSpec{
+					ReleaseImage: "registry.ci.openshift.org/ocp/release@sha256:foo",
 				},
 			},
 		},
@@ -70,7 +122,7 @@ func TestClusterImageSet_Generate(t *testing.T) {
 			parents.Add(tc.dependencies...)
 
 			asset := &ClusterImageSet{}
-			err := asset.Generate(parents)
+			err := asset.Generate(context.Background(), parents)
 
 			if tc.expectedError != "" {
 				assert.Equal(t, tc.expectedError, err.Error())
@@ -130,7 +182,7 @@ metadata:
   name: openshift-v4.10.0
 spec:
   releaseImage: 99.999`,
-			expectedError: fmt.Sprintf("invalid ClusterImageSet configuration: Spec.ReleaseImage: Forbidden: value must be equal to %s", currentRelease),
+			expectedError: fmt.Sprintf("invalid ClusterImageSet configuration: spec.releaseImage: Invalid value: \"99.999\": value must be equal to %s", currentRelease),
 		},
 		{
 			name:          "not-yaml",
@@ -140,7 +192,7 @@ spec:
 		{
 			name:          "empty",
 			data:          "",
-			expectedError: fmt.Sprintf("invalid ClusterImageSet configuration: Spec.ReleaseImage: Forbidden: value must be equal to %s", currentRelease),
+			expectedError: fmt.Sprintf("invalid ClusterImageSet configuration: spec.releaseImage: Invalid value: \"\": value must be equal to %s", currentRelease),
 		},
 		{
 			name:       "file-not-found",
@@ -175,6 +227,13 @@ spec:
 						Filename: clusterImageSetFilename,
 						Data:     []byte(tc.data)},
 					tc.fetchError,
+				)
+			fileFetcher.EXPECT().FetchByName(".agentworkflow").
+				Return(
+					&asset.File{
+						Filename: ".agentworkflow",
+						Data:     []byte("install")},
+					nil,
 				)
 
 			asset := &ClusterImageSet{}

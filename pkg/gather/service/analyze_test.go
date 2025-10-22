@@ -39,7 +39,6 @@ func failedReleaseImage() []logrus.Entry {
 
 func failedURLChecks() []logrus.Entry {
 	return []logrus.Entry{
-		{Level: logrus.WarnLevel, Message: "The bootstrap machine is unable to resolve API and/or API-Int Server URLs"},
 		{Level: logrus.InfoLevel, Message: "Line 1"},
 		{Level: logrus.InfoLevel, Message: "Line 2"},
 		{Level: logrus.InfoLevel, Message: "Line 3"},
@@ -55,7 +54,7 @@ func TestAnalyzeGatherBundle(t *testing.T) {
 		{
 			name: "no files",
 			expectedOutput: []logrus.Entry{
-				{Level: logrus.ErrorLevel, Message: "The bootstrap machine did not execute the release-image.service systemd unit"},
+				{Level: logrus.ErrorLevel, Message: "Invalid log bundle or the bootstrap machine could not be reached and bootstrap logs were not collected"},
 			},
 		},
 		{

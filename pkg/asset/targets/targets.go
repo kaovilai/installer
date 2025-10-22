@@ -3,13 +3,16 @@ package targets
 import (
 	"github.com/openshift/installer/pkg/asset"
 	"github.com/openshift/installer/pkg/asset/cluster"
+	"github.com/openshift/installer/pkg/asset/cluster/tfvars"
 	"github.com/openshift/installer/pkg/asset/ignition/bootstrap"
 	"github.com/openshift/installer/pkg/asset/ignition/machine"
 	"github.com/openshift/installer/pkg/asset/installconfig"
 	"github.com/openshift/installer/pkg/asset/kubeconfig"
 	"github.com/openshift/installer/pkg/asset/machines"
 	"github.com/openshift/installer/pkg/asset/manifests"
+	"github.com/openshift/installer/pkg/asset/manifests/clusterapi"
 	"github.com/openshift/installer/pkg/asset/password"
+	"github.com/openshift/installer/pkg/asset/permissions"
 	"github.com/openshift/installer/pkg/asset/templates/content/bootkube"
 	"github.com/openshift/installer/pkg/asset/templates/content/openshift"
 	"github.com/openshift/installer/pkg/asset/tls"
@@ -24,14 +27,19 @@ var (
 	// Manifests are the manifests targeted assets.
 	Manifests = []asset.WritableAsset{
 		&machines.Master{},
+		&machines.Arbiter{},
 		&machines.Worker{},
+		&machines.ClusterAPI{},
 		&manifests.Manifests{},
 		&manifests.Openshift{},
+		&clusterapi.Cluster{},
 	}
 
 	// ManifestTemplates are the manifest-templates targeted assets.
 	ManifestTemplates = []asset.WritableAsset{
 		&bootkube.KubeCloudConfig{},
+		&bootkube.MachineConfigServerCASecret{},
+		&bootkube.MachineConfigServerCAConfigMap{},
 		&bootkube.MachineConfigServerTLSSecret{},
 		&bootkube.CVOOverrides{},
 		&bootkube.KubeSystemConfigmapRootCA{},
@@ -47,6 +55,7 @@ var (
 		&kubeconfig.AdminClient{},
 		&password.KubeadminPassword{},
 		&machine.Master{},
+		&machine.Arbiter{},
 		&machine.Worker{},
 		&bootstrap.Bootstrap{},
 		&cluster.Metadata{},
@@ -65,11 +74,17 @@ var (
 	Cluster = []asset.WritableAsset{
 		&cluster.Metadata{},
 		&machine.MasterIgnitionCustomizations{},
+		&machine.ArbiterIgnitionCustomizations{},
 		&machine.WorkerIgnitionCustomizations{},
-		&cluster.TerraformVariables{},
+		&tfvars.TerraformVariables{},
 		&kubeconfig.AdminClient{},
 		&password.KubeadminPassword{},
 		&tls.JournalCertKey{},
 		&cluster.Cluster{},
+	}
+
+	// Permissions are the required permissions assets.
+	Permissions = []asset.WritableAsset{
+		&permissions.Permissions{},
 	}
 )

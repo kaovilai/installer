@@ -24,12 +24,11 @@ type V2ClusterUpdateParams struct {
 	// A comma-separated list of NTP sources (name or IP) going to be added to all the hosts.
 	AdditionalNtpSource *string `json:"additional_ntp_source,omitempty"`
 
-	// The virtual IP used to reach the OpenShift cluster's API.
-	// Pattern: ^(?:(?:(?:[0-9]{1,3}\.){3}[0-9]{1,3})|(?:(?:[0-9a-fA-F]*:[0-9a-fA-F]*){2,}))?$
-	APIVip *string `json:"api_vip,omitempty"`
-
 	// The domain name used to reach the OpenShift cluster API.
 	APIVipDNSName *string `json:"api_vip_dns_name,omitempty"`
+
+	// The virtual IPs used to reach the OpenShift cluster's API. Enter one IP address for single-stack clusters, or up to two for dual-stack clusters (at most one IP address per IP stack used). The order of stacks should be the same as order of subnets in Cluster Networks, Service Networks, and Machine Networks.
+	APIVips []*APIVip `json:"api_vips"`
 
 	// Base domain of the cluster. All DNS records must be sub-domains of this base and include the cluster name.
 	BaseDNSDomain *string `json:"base_dns_domain,omitempty"`
@@ -46,6 +45,9 @@ type V2ClusterUpdateParams struct {
 	// Cluster networks that are associated with this cluster.
 	ClusterNetworks []*ClusterNetwork `json:"cluster_networks"`
 
+	// Specifies the required number of control plane nodes that should be part of the cluster.
+	ControlPlaneCount *int64 `json:"control_plane_count,omitempty"`
+
 	// Installation disks encryption mode and host roles to be applied.
 	DiskEncryption *DiskEncryption `json:"disk_encryption,omitempty" gorm:"embedded;embeddedPrefix:disk_encryption_"`
 
@@ -59,16 +61,18 @@ type V2ClusterUpdateParams struct {
 	//
 	HTTPSProxy *string `json:"https_proxy,omitempty"`
 
-	// Enable/disable hyperthreading on master nodes, worker nodes, or all nodes.
-	// Enum: [masters workers all none]
+	// Enable/disable hyperthreading on master nodes, arbiter nodes, worker nodes, or a combination of them.
+	// Enum: [none masters arbiters workers masters,arbiters masters,workers arbiters,workers masters,arbiters,workers all]
 	Hyperthreading *string `json:"hyperthreading,omitempty"`
 
 	// Explicit ignition endpoint overrides the default ignition endpoint.
 	IgnitionEndpoint *IgnitionEndpoint `json:"ignition_endpoint,omitempty" gorm:"embedded;embeddedPrefix:ignition_endpoint_"`
 
-	// The virtual IP used for cluster ingress traffic.
-	// Pattern: ^(?:(?:(?:[0-9]{1,3}\.){3}[0-9]{1,3})|(?:(?:[0-9a-fA-F]*:[0-9a-fA-F]*){2,}))?$
-	IngressVip *string `json:"ingress_vip,omitempty"`
+	// The virtual IPs used for cluster ingress traffic. Enter one IP address for single-stack clusters, or up to two for dual-stack clusters (at most one IP address per IP stack used). The order of stacks should be the same as order of subnets in Cluster Networks, Service Networks, and Machine Networks.
+	IngressVips []*IngressVip `json:"ingress_vips"`
+
+	// load balancer
+	LoadBalancer *LoadBalancer `json:"load_balancer,omitempty" gorm:"embedded;embeddedPrefix:load_balancer_"`
 
 	// A CIDR that all hosts belonging to the cluster should have an interfaces with IP address that belongs to this CIDR. The api_vip belongs to this CIDR.
 	// Pattern: ^(?:(?:(?:[0-9]{1,3}\.){3}[0-9]{1,3}\/(?:(?:[0-9])|(?:[1-2][0-9])|(?:3[0-2])))|(?:(?:[0-9a-fA-F]*:[0-9a-fA-F]*){2,})/(?:(?:[0-9])|(?:[1-9][0-9])|(?:1[0-1][0-9])|(?:12[0-8])))$
@@ -90,6 +94,8 @@ type V2ClusterUpdateParams struct {
 	NoProxy *string `json:"no_proxy,omitempty"`
 
 	// List of OLM operators to be installed.
+	// For the full list of supported operators, check the endpoint `/v2/supported-operators`:
+	//
 	OlmOperators []*OperatorCreateParams `json:"olm_operators"`
 
 	// platform
@@ -114,7 +120,7 @@ type V2ClusterUpdateParams struct {
 	// A comma-separated list of tags that are associated to the cluster.
 	Tags *string `json:"tags,omitempty"`
 
-	// Indicate if the networking is managed by the user.
+	// (DEPRECATED) Indicate if the networking is managed by the user.
 	UserManagedNetworking *bool `json:"user_managed_networking,omitempty"`
 
 	// Indicate if virtual IP DHCP allocation mode is enabled.
@@ -125,7 +131,7 @@ type V2ClusterUpdateParams struct {
 func (m *V2ClusterUpdateParams) Validate(formats strfmt.Registry) error {
 	var res []error
 
-	if err := m.validateAPIVip(formats); err != nil {
+	if err := m.validateAPIVips(formats); err != nil {
 		res = append(res, err)
 	}
 
@@ -153,7 +159,11 @@ func (m *V2ClusterUpdateParams) Validate(formats strfmt.Registry) error {
 		res = append(res, err)
 	}
 
-	if err := m.validateIngressVip(formats); err != nil {
+	if err := m.validateIngressVips(formats); err != nil {
+		res = append(res, err)
+	}
+
+	if err := m.validateLoadBalancer(formats); err != nil {
 		res = append(res, err)
 	}
 
@@ -195,13 +205,27 @@ func (m *V2ClusterUpdateParams) Validate(formats strfmt.Registry) error {
 	return nil
 }
 
-func (m *V2ClusterUpdateParams) validateAPIVip(formats strfmt.Registry) error {
-	if swag.IsZero(m.APIVip) { // not required
+func (m *V2ClusterUpdateParams) validateAPIVips(formats strfmt.Registry) error {
+	if swag.IsZero(m.APIVips) { // not required
 		return nil
 	}
 
-	if err := validate.Pattern("api_vip", "body", *m.APIVip, `^(?:(?:(?:[0-9]{1,3}\.){3}[0-9]{1,3})|(?:(?:[0-9a-fA-F]*:[0-9a-fA-F]*){2,}))?$`); err != nil {
-		return err
+	for i := 0; i < len(m.APIVips); i++ {
+		if swag.IsZero(m.APIVips[i]) { // not required
+			continue
+		}
+
+		if m.APIVips[i] != nil {
+			if err := m.APIVips[i].Validate(formats); err != nil {
+				if ve, ok := err.(*errors.Validation); ok {
+					return ve.ValidateName("api_vips" + "." + strconv.Itoa(i))
+				} else if ce, ok := err.(*errors.CompositeError); ok {
+					return ce.ValidateName("api_vips" + "." + strconv.Itoa(i))
+				}
+				return err
+			}
+		}
+
 	}
 
 	return nil
@@ -284,7 +308,7 @@ var v2ClusterUpdateParamsTypeHyperthreadingPropEnum []interface{}
 
 func init() {
 	var res []string
-	if err := json.Unmarshal([]byte(`["masters","workers","all","none"]`), &res); err != nil {
+	if err := json.Unmarshal([]byte(`["none","masters","arbiters","workers","masters,arbiters","masters,workers","arbiters,workers","masters,arbiters,workers","all"]`), &res); err != nil {
 		panic(err)
 	}
 	for _, v := range res {
@@ -294,17 +318,32 @@ func init() {
 
 const (
 
+	// V2ClusterUpdateParamsHyperthreadingNone captures enum value "none"
+	V2ClusterUpdateParamsHyperthreadingNone string = "none"
+
 	// V2ClusterUpdateParamsHyperthreadingMasters captures enum value "masters"
 	V2ClusterUpdateParamsHyperthreadingMasters string = "masters"
+
+	// V2ClusterUpdateParamsHyperthreadingArbiters captures enum value "arbiters"
+	V2ClusterUpdateParamsHyperthreadingArbiters string = "arbiters"
 
 	// V2ClusterUpdateParamsHyperthreadingWorkers captures enum value "workers"
 	V2ClusterUpdateParamsHyperthreadingWorkers string = "workers"
 
+	// V2ClusterUpdateParamsHyperthreadingMastersArbiters captures enum value "masters,arbiters"
+	V2ClusterUpdateParamsHyperthreadingMastersArbiters string = "masters,arbiters"
+
+	// V2ClusterUpdateParamsHyperthreadingMastersWorkers captures enum value "masters,workers"
+	V2ClusterUpdateParamsHyperthreadingMastersWorkers string = "masters,workers"
+
+	// V2ClusterUpdateParamsHyperthreadingArbitersWorkers captures enum value "arbiters,workers"
+	V2ClusterUpdateParamsHyperthreadingArbitersWorkers string = "arbiters,workers"
+
+	// V2ClusterUpdateParamsHyperthreadingMastersArbitersWorkers captures enum value "masters,arbiters,workers"
+	V2ClusterUpdateParamsHyperthreadingMastersArbitersWorkers string = "masters,arbiters,workers"
+
 	// V2ClusterUpdateParamsHyperthreadingAll captures enum value "all"
 	V2ClusterUpdateParamsHyperthreadingAll string = "all"
-
-	// V2ClusterUpdateParamsHyperthreadingNone captures enum value "none"
-	V2ClusterUpdateParamsHyperthreadingNone string = "none"
 )
 
 // prop value enum
@@ -347,13 +386,46 @@ func (m *V2ClusterUpdateParams) validateIgnitionEndpoint(formats strfmt.Registry
 	return nil
 }
 
-func (m *V2ClusterUpdateParams) validateIngressVip(formats strfmt.Registry) error {
-	if swag.IsZero(m.IngressVip) { // not required
+func (m *V2ClusterUpdateParams) validateIngressVips(formats strfmt.Registry) error {
+	if swag.IsZero(m.IngressVips) { // not required
 		return nil
 	}
 
-	if err := validate.Pattern("ingress_vip", "body", *m.IngressVip, `^(?:(?:(?:[0-9]{1,3}\.){3}[0-9]{1,3})|(?:(?:[0-9a-fA-F]*:[0-9a-fA-F]*){2,}))?$`); err != nil {
-		return err
+	for i := 0; i < len(m.IngressVips); i++ {
+		if swag.IsZero(m.IngressVips[i]) { // not required
+			continue
+		}
+
+		if m.IngressVips[i] != nil {
+			if err := m.IngressVips[i].Validate(formats); err != nil {
+				if ve, ok := err.(*errors.Validation); ok {
+					return ve.ValidateName("ingress_vips" + "." + strconv.Itoa(i))
+				} else if ce, ok := err.(*errors.CompositeError); ok {
+					return ce.ValidateName("ingress_vips" + "." + strconv.Itoa(i))
+				}
+				return err
+			}
+		}
+
+	}
+
+	return nil
+}
+
+func (m *V2ClusterUpdateParams) validateLoadBalancer(formats strfmt.Registry) error {
+	if swag.IsZero(m.LoadBalancer) { // not required
+		return nil
+	}
+
+	if m.LoadBalancer != nil {
+		if err := m.LoadBalancer.Validate(formats); err != nil {
+			if ve, ok := err.(*errors.Validation); ok {
+				return ve.ValidateName("load_balancer")
+			} else if ce, ok := err.(*errors.CompositeError); ok {
+				return ce.ValidateName("load_balancer")
+			}
+			return err
+		}
 	}
 
 	return nil
@@ -542,6 +614,10 @@ func (m *V2ClusterUpdateParams) validateServiceNetworks(formats strfmt.Registry)
 func (m *V2ClusterUpdateParams) ContextValidate(ctx context.Context, formats strfmt.Registry) error {
 	var res []error
 
+	if err := m.contextValidateAPIVips(ctx, formats); err != nil {
+		res = append(res, err)
+	}
+
 	if err := m.contextValidateClusterNetworks(ctx, formats); err != nil {
 		res = append(res, err)
 	}
@@ -551,6 +627,14 @@ func (m *V2ClusterUpdateParams) ContextValidate(ctx context.Context, formats str
 	}
 
 	if err := m.contextValidateIgnitionEndpoint(ctx, formats); err != nil {
+		res = append(res, err)
+	}
+
+	if err := m.contextValidateIngressVips(ctx, formats); err != nil {
+		res = append(res, err)
+	}
+
+	if err := m.contextValidateLoadBalancer(ctx, formats); err != nil {
 		res = append(res, err)
 	}
 
@@ -573,6 +657,26 @@ func (m *V2ClusterUpdateParams) ContextValidate(ctx context.Context, formats str
 	if len(res) > 0 {
 		return errors.CompositeValidationError(res...)
 	}
+	return nil
+}
+
+func (m *V2ClusterUpdateParams) contextValidateAPIVips(ctx context.Context, formats strfmt.Registry) error {
+
+	for i := 0; i < len(m.APIVips); i++ {
+
+		if m.APIVips[i] != nil {
+			if err := m.APIVips[i].ContextValidate(ctx, formats); err != nil {
+				if ve, ok := err.(*errors.Validation); ok {
+					return ve.ValidateName("api_vips" + "." + strconv.Itoa(i))
+				} else if ce, ok := err.(*errors.CompositeError); ok {
+					return ce.ValidateName("api_vips" + "." + strconv.Itoa(i))
+				}
+				return err
+			}
+		}
+
+	}
+
 	return nil
 }
 
@@ -620,6 +724,42 @@ func (m *V2ClusterUpdateParams) contextValidateIgnitionEndpoint(ctx context.Cont
 				return ve.ValidateName("ignition_endpoint")
 			} else if ce, ok := err.(*errors.CompositeError); ok {
 				return ce.ValidateName("ignition_endpoint")
+			}
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (m *V2ClusterUpdateParams) contextValidateIngressVips(ctx context.Context, formats strfmt.Registry) error {
+
+	for i := 0; i < len(m.IngressVips); i++ {
+
+		if m.IngressVips[i] != nil {
+			if err := m.IngressVips[i].ContextValidate(ctx, formats); err != nil {
+				if ve, ok := err.(*errors.Validation); ok {
+					return ve.ValidateName("ingress_vips" + "." + strconv.Itoa(i))
+				} else if ce, ok := err.(*errors.CompositeError); ok {
+					return ce.ValidateName("ingress_vips" + "." + strconv.Itoa(i))
+				}
+				return err
+			}
+		}
+
+	}
+
+	return nil
+}
+
+func (m *V2ClusterUpdateParams) contextValidateLoadBalancer(ctx context.Context, formats strfmt.Registry) error {
+
+	if m.LoadBalancer != nil {
+		if err := m.LoadBalancer.ContextValidate(ctx, formats); err != nil {
+			if ve, ok := err.(*errors.Validation); ok {
+				return ve.ValidateName("load_balancer")
+			} else if ce, ok := err.(*errors.CompositeError); ok {
+				return ce.ValidateName("load_balancer")
 			}
 			return err
 		}

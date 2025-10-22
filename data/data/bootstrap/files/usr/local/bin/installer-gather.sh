@@ -6,7 +6,7 @@
 # Get target architecture
 arch=$(uname -m)
 
-if test "x${1}" = 'x--id'
+if test "${1}" = '--id'
 then
 	GATHER_ID="${2}"
 	shift 2
@@ -34,12 +34,13 @@ done
 
 echo "Gathering bootstrap journals ..."
 mkdir -p "${ARTIFACTS}/bootstrap/journals"
-for service in approve-csr bootkube crio crio-configure ironic kubelet master-bmh-update release-image release-image-download sssd
+for service in approve-csr bootkube crio crio-configure image-customization ironic ironic-dnsmasq ironic-httpd ironic-ramdisk-logs \
+    kubelet master-bmh-update metal3-baremetal-operator release-image release-image-download sssd
 do
     journalctl --boot --no-pager --output=short --unit="${service}" > "${ARTIFACTS}/bootstrap/journals/${service}.log"
 done
 
-journalctl --no-pager | gzip > "${ARTIFACTS}/bootstrap/journals/journal.log.gz"
+journalctl -o with-unit --no-pager | gzip > "${ARTIFACTS}/bootstrap/journals/journal.log.gz"
 
 echo "Gathering bootstrap networking ..."
 mkdir -p "${ARTIFACTS}/bootstrap/network"

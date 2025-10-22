@@ -11,7 +11,7 @@ import (
 
 	"github.com/openshift/installer/pkg/asset"
 	"github.com/openshift/installer/pkg/asset/installconfig"
-	configgcp "github.com/openshift/installer/pkg/asset/installconfig/gcp"
+	awsconfig "github.com/openshift/installer/pkg/asset/installconfig/aws"
 	openstackvalidation "github.com/openshift/installer/pkg/asset/installconfig/openstack/validation"
 	configpowervs "github.com/openshift/installer/pkg/asset/installconfig/powervs"
 	"github.com/openshift/installer/pkg/asset/machines"
@@ -22,13 +22,12 @@ import (
 	"github.com/openshift/installer/pkg/quota"
 	quotaaws "github.com/openshift/installer/pkg/quota/aws"
 	quotagcp "github.com/openshift/installer/pkg/quota/gcp"
-	"github.com/openshift/installer/pkg/types/alibabacloud"
 	typesaws "github.com/openshift/installer/pkg/types/aws"
 	"github.com/openshift/installer/pkg/types/azure"
 	"github.com/openshift/installer/pkg/types/baremetal"
+	"github.com/openshift/installer/pkg/types/external"
 	typesgcp "github.com/openshift/installer/pkg/types/gcp"
 	"github.com/openshift/installer/pkg/types/ibmcloud"
-	"github.com/openshift/installer/pkg/types/libvirt"
 	"github.com/openshift/installer/pkg/types/none"
 	"github.com/openshift/installer/pkg/types/nutanix"
 	typesopenstack "github.com/openshift/installer/pkg/types/openstack"
@@ -54,7 +53,7 @@ func (a *PlatformQuotaCheck) Dependencies() []asset.Asset {
 }
 
 // Generate queries for input from the user.
-func (a *PlatformQuotaCheck) Generate(dependencies asset.Parents) error {
+func (a *PlatformQuotaCheck) Generate(ctx context.Context, dependencies asset.Parents) error {
 	ic := &installconfig.InstallConfig{}
 	mastersAsset := &machines.Master{}
 	workersAsset := &machines.Worker{}
@@ -78,12 +77,8 @@ func (a *PlatformQuotaCheck) Generate(dependencies asset.Parents) error {
 			return nil
 		}
 		services := []string{"ec2", "vpc"}
-		session, err := ic.AWS.Session(context.TODO())
-		if err != nil {
-			return errors.Wrap(err, "failed to load AWS session")
-		}
-		q, err := quotaaws.Load(context.TODO(), session, ic.AWS.Region, services...)
-		if quotaaws.IsUnauthorized(err) {
+		q, err := quotaaws.Load(ctx, ic.AWS.Region, ic.AWS.Services, services...)
+		if awsconfig.IsUnauthorized(err) {
 			logrus.Debugf("Missing permissions to fetch Quotas and therefore will skip checking them: %v, make sure you have `servicequotas:ListAWSDefaultServiceQuotas` permission available to the user.", err)
 			logrus.Info("Skipping quota checks")
 			return nil
@@ -91,8 +86,8 @@ func (a *PlatformQuotaCheck) Generate(dependencies asset.Parents) error {
 		if err != nil {
 			return errors.Wrapf(err, "failed to load Quota for services: %s", strings.Join(services, ", "))
 		}
-		instanceTypes, err := aws.InstanceTypes(context.TODO(), session, ic.AWS.Region)
-		if quotaaws.IsUnauthorized(err) {
+		instanceTypes, err := aws.InstanceTypes(ctx, ic.AWS.Region, ic.AWS.Services)
+		if awsconfig.IsUnauthorized(err) {
 			logrus.Warnf("Missing permissions to fetch instance types and therefore will skip checking Quotas: %v, make sure you have `ec2:DescribeInstanceTypes` permission available to the user.", err)
 			return nil
 		}
@@ -106,7 +101,7 @@ func (a *PlatformQuotaCheck) Generate(dependencies asset.Parents) error {
 		summarizeReport(reports)
 	case typesgcp.Name:
 		services := []string{"compute.googleapis.com", "iam.googleapis.com"}
-		q, err := quotagcp.Load(context.TODO(), ic.Config.Platform.GCP.ProjectID, services...)
+		q, err := quotagcp.Load(ctx, ic.Config.Platform.GCP.ProjectID, ic.Config.Platform.GCP.ServiceEndpoints, services...)
 		if quotagcp.IsUnauthorized(err) {
 			logrus.Warnf("Missing permissions to fetch Quotas and therefore will skip checking them: %v, make sure you have `roles/servicemanagement.quotaViewer` assigned to the user.", err)
 			return nil
@@ -114,11 +109,7 @@ func (a *PlatformQuotaCheck) Generate(dependencies asset.Parents) error {
 		if err != nil {
 			return errors.Wrapf(err, "failed to load Quota for services: %s", strings.Join(services, ", "))
 		}
-		session, err := configgcp.GetSession(context.TODO())
-		if err != nil {
-			return errors.Wrap(err, "failed to load GCP session")
-		}
-		client, err := gcp.NewClient(context.TODO(), session, ic.Config.Platform.GCP.ProjectID)
+		client, err := gcp.NewClient(ctx, ic.Config.Platform.GCP.ProjectID, ic.Config.Platform.GCP.ServiceEndpoints)
 		if err != nil {
 			return errors.Wrap(err, "failed to create client for quota constraints")
 		}
@@ -132,7 +123,7 @@ func (a *PlatformQuotaCheck) Generate(dependencies asset.Parents) error {
 			logrus.Warnf("OVERRIDE: pre-flight validation disabled.")
 			return nil
 		}
-		ci, err := openstackvalidation.GetCloudInfo(ic.Config)
+		ci, err := openstackvalidation.GetCloudInfo(ctx, ic.Config)
 		if err != nil {
 			return errors.Wrap(err, "failed to get cloud info")
 		}
@@ -140,40 +131,23 @@ func (a *PlatformQuotaCheck) Generate(dependencies asset.Parents) error {
 			logrus.Warnf("Empty OpenStack cloud info and therefore will skip checking quota validation.")
 			return nil
 		}
-		reports, err := quota.Check(ci.Quotas, openstack.Constraints(ci, masters, workers, ic.Config.NetworkType))
+		reports, err := quota.Check(ci.Quotas, openstack.Constraints(ci, masters, workers))
 		if err != nil {
 			return summarizeFailingReport(reports)
 		}
 		summarizeReport(reports)
 	case powervs.Name:
-		bxCli, err := configpowervs.NewBxClient()
+		// We need to prompt for missing variables because NewPISession requires them!
+		bxCli, err := configpowervs.NewBxClient(true)
 		if err != nil {
 			return errors.Wrap(err, "failed to create bluemix client")
 		}
 
 		err = bxCli.NewPISession()
 		if err != nil {
-			return errors.Wrap(err, "failed to get PowerVS connection details")
+			return errors.Wrap(err, "failed to create a new PISession")
 		}
-
-		// Only check that there isn't an existing Cloud connection if we're not re-using one
-		if ic.Config.Platform.PowerVS.CloudConnectionName == "" {
-			err = bxCli.ValidateCloudConnectionInPowerVSRegion(context.TODO(), ic.Config.Platform.PowerVS.ServiceInstanceID)
-			if err != nil {
-				return errors.Wrap(err, "failed to meet the prerequisite for Cloud Connections")
-			}
-		}
-		err = bxCli.ValidateCapacity(context.TODO(), masters, workers, ic.Config.Platform.PowerVS.ServiceInstanceID)
-		if err != nil {
-			return err
-		}
-		if ic.Config.Platform.PowerVS.PVSNetworkName == "" {
-			err = bxCli.ValidateDhcpService(context.TODO(), ic.Config.Platform.PowerVS.ServiceInstanceID, ic.Config.MachineNetwork)
-			if err != nil {
-				return errors.Wrap(err, "failed to meet the prerequisite of one DHCP service per Power VS instance")
-			}
-		}
-	case alibabacloud.Name, azure.Name, baremetal.Name, ibmcloud.Name, libvirt.Name, none.Name, ovirt.Name, vsphere.Name, nutanix.Name:
+	case azure.Name, baremetal.Name, ibmcloud.Name, external.Name, none.Name, ovirt.Name, vsphere.Name, nutanix.Name:
 		// no special provisioning requirements to check
 	default:
 		err = fmt.Errorf("unknown platform type %q", platform)

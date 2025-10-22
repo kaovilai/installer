@@ -9,6 +9,7 @@ import (
 	"github.com/hashicorp/terraform-exec/tfexec"
 	"github.com/pkg/errors"
 
+	"github.com/openshift/installer/pkg/asset"
 	"github.com/openshift/installer/pkg/terraform"
 	"github.com/openshift/installer/pkg/terraform/providers"
 	"github.com/openshift/installer/pkg/types"
@@ -57,6 +58,14 @@ func WithCustomExtractHostAddresses(extractHostAddresses ExtractFunc) StageOptio
 	}
 }
 
+// WithCustomExtractLBConfig returns an option for specifying that a split stage
+// should use a custom method to extract load balancer DNS names.
+func WithCustomExtractLBConfig(extractLBConfig ExtractLBConfigFunc) StageOption {
+	return func(s *SplitStage) {
+		s.extractLBConfig = extractLBConfig
+	}
+}
+
 // SplitStage is a split stage.
 type SplitStage struct {
 	platform             string
@@ -65,6 +74,7 @@ type SplitStage struct {
 	destroyWithBootstrap bool
 	destroy              DestroyFunc
 	extractHostAddresses ExtractFunc
+	extractLBConfig      ExtractLBConfigFunc
 }
 
 // DestroyFunc is a function for destroying the stage.
@@ -72,6 +82,9 @@ type DestroyFunc func(s SplitStage, directory string, terraformDir string, varFi
 
 // ExtractFunc is a function for extracting host addresses.
 type ExtractFunc func(s SplitStage, directory string, ic *types.InstallConfig) (string, int, []string, error)
+
+// ExtractLBConfigFunc is a function for extracting LB DNS Names.
+type ExtractLBConfigFunc func(s SplitStage, directory string, terraformDir string, file *asset.File, tfvarsFile *asset.File) (string, error)
 
 // Name implements pkg/terraform/Stage.Name
 func (s SplitStage) Name() string {
@@ -103,12 +116,25 @@ func (s SplitStage) Destroy(directory string, terraformDir string, varFiles []st
 	return s.destroy(s, directory, terraformDir, varFiles)
 }
 
+// Platform implements pkg/terraform/Stage.Platform.
+func (s SplitStage) Platform() string {
+	return s.platform
+}
+
 // ExtractHostAddresses implements pkg/terraform/Stage.ExtractHostAddresses
 func (s SplitStage) ExtractHostAddresses(directory string, ic *types.InstallConfig) (string, int, []string, error) {
 	if s.extractHostAddresses != nil {
 		return s.extractHostAddresses(s, directory, ic)
 	}
 	return normalExtractHostAddresses(s, directory, ic)
+}
+
+// ExtractLBConfig implements pkg/terraform/Stage.ExtractLBConfig.
+func (s SplitStage) ExtractLBConfig(directory string, terraformDir string, file *asset.File, tfvarsFile *asset.File) (string, error) {
+	if s.extractLBConfig != nil {
+		return s.extractLBConfig(s, directory, terraformDir, file, tfvarsFile)
+	}
+	return normalExtractLBConfig(s, directory, terraformDir, file, tfvarsFile)
 }
 
 // GetTerraformOutputs reads the terraform outputs file for the stage and parses it into a map of outputs.
@@ -170,4 +196,8 @@ func normalDestroy(s SplitStage, directory string, terraformDir string, varFiles
 		opts[i] = tfexec.VarFile(varFile)
 	}
 	return errors.Wrap(terraform.Destroy(directory, s.platform, s, terraformDir, opts...), "terraform destroy")
+}
+
+func normalExtractLBConfig(s SplitStage, directory string, terraformDir string, file *asset.File, tfvarsFile *asset.File) (string, error) {
+	return "", nil
 }

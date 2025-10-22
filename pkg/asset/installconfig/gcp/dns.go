@@ -9,30 +9,14 @@ import (
 	survey "github.com/AlecAivazis/survey/v2"
 	"github.com/AlecAivazis/survey/v2/core"
 	"github.com/pkg/errors"
-	dns "google.golang.org/api/dns/v1"
 	"google.golang.org/api/googleapi"
+
+	configv1 "github.com/openshift/api/config/v1"
 )
 
-// GetPublicZone returns a DNS managed zone from the provided project which matches the baseDomain
-// If multiple zones match the basedomain, it uses the last public zone in the list as provided by the GCP API.
-func GetPublicZone(ctx context.Context, project, baseDomain string) (*dns.ManagedZone, error) {
-	client, err := NewClient(context.TODO())
-	if err != nil {
-		return nil, err
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Minute)
-	defer cancel()
-
-	dnsZone, err := client.GetPublicDNSZone(ctx, project, baseDomain)
-	if err != nil {
-		return nil, err
-	}
-	return dnsZone, nil
-}
-
 // GetBaseDomain returns a base domain chosen from among the project's public DNS zones.
-func GetBaseDomain(project string) (string, error) {
-	client, err := NewClient(context.TODO())
+func GetBaseDomain(project string, endpoints []configv1.GCPServiceEndpoint) (string, error) {
+	client, err := NewClient(context.TODO(), endpoints)
 	if err != nil {
 		return "", err
 	}
@@ -86,6 +70,9 @@ func IsThrottled(err error) bool {
 
 // IsNotFound checks whether a response from the GPC API was not found.
 func IsNotFound(err error) bool {
-	gErr, ok := err.(*googleapi.Error)
-	return ok && gErr.Code == http.StatusNotFound
+	var gErr *googleapi.Error
+	if errors.As(err, &gErr) {
+		return gErr.Code == http.StatusNotFound
+	}
+	return false
 }

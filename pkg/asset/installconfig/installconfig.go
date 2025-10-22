@@ -9,7 +9,6 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation/field"
 
 	"github.com/openshift/installer/pkg/asset"
-	"github.com/openshift/installer/pkg/asset/installconfig/alibabacloud"
 	"github.com/openshift/installer/pkg/asset/installconfig/aws"
 	icazure "github.com/openshift/installer/pkg/asset/installconfig/azure"
 	icgcp "github.com/openshift/installer/pkg/asset/installconfig/gcp"
@@ -31,11 +30,11 @@ const (
 // InstallConfig generates the install-config.yaml file.
 type InstallConfig struct {
 	AssetBase
-	AWS          *aws.Metadata          `json:"aws,omitempty"`
-	Azure        *icazure.Metadata      `json:"azure,omitempty"`
-	IBMCloud     *icibmcloud.Metadata   `json:"ibmcloud,omitempty"`
-	AlibabaCloud *alibabacloud.Metadata `json:"alibabacloud,omitempty"`
-	PowerVS      *icpowervs.Metadata    `json:"powervs,omitempty"`
+	AWS      *aws.Metadata        `json:"aws,omitempty"`
+	Azure    *icazure.Metadata    `json:"azure,omitempty"`
+	IBMCloud *icibmcloud.Metadata `json:"ibmcloud,omitempty"`
+	PowerVS  *icpowervs.Metadata  `json:"powervs,omitempty"`
+	VSphere  *icvsphere.Metadata  `json:"vsphere,omitempty"`
 }
 
 var _ asset.WritableAsset = (*InstallConfig)(nil)
@@ -56,25 +55,22 @@ func (a *InstallConfig) Dependencies() []asset.Asset {
 		&sshPublicKey{},
 		&baseDomain{},
 		&clusterName{},
-		&networking{},
 		&pullSecret{},
 		&platform{},
 	}
 }
 
-// Generate generates the install-config.yaml file.
-func (a *InstallConfig) Generate(parents asset.Parents) error {
+// Generate the install-config.yaml file.
+func (a *InstallConfig) Generate(ctx context.Context, parents asset.Parents) error {
 	sshPublicKey := &sshPublicKey{}
 	baseDomain := &baseDomain{}
 	clusterName := &clusterName{}
-	networking := &networking{}
 	pullSecret := &pullSecret{}
 	platform := &platform{}
 	parents.Get(
 		sshPublicKey,
 		baseDomain,
 		clusterName,
-		networking,
 		pullSecret,
 		platform,
 	)
@@ -88,15 +84,11 @@ func (a *InstallConfig) Generate(parents asset.Parents) error {
 		},
 		SSHKey:     sshPublicKey.Key,
 		BaseDomain: baseDomain.BaseDomain,
+		Publish:    baseDomain.Publish,
 		PullSecret: pullSecret.PullSecret,
-		Networking: &types.Networking{
-			MachineNetwork: networking.machineNetwork,
-		},
 	}
 
-	a.Config.AlibabaCloud = platform.AlibabaCloud
 	a.Config.AWS = platform.AWS
-	a.Config.Libvirt = platform.Libvirt
 	a.Config.None = platform.None
 	a.Config.OpenStack = platform.OpenStack
 	a.Config.VSphere = platform.VSphere
@@ -110,14 +102,15 @@ func (a *InstallConfig) Generate(parents asset.Parents) error {
 
 	defaults.SetInstallConfigDefaults(a.Config)
 
-	return a.finish("")
+	return a.finish(ctx, "")
 }
 
 // Load returns the installconfig from disk.
 func (a *InstallConfig) Load(f asset.FileFetcher) (found bool, err error) {
+	ctx := context.TODO()
 	found, err = a.LoadFromFile(f)
 	if found && err == nil {
-		if err := a.finish(installConfigFilename); err != nil {
+		if err := a.finish(ctx, installConfigFilename); err != nil {
 			return false, errors.Wrap(err, asset.InstallConfigError)
 		}
 	}
@@ -127,9 +120,9 @@ func (a *InstallConfig) Load(f asset.FileFetcher) (found bool, err error) {
 
 // finishAWS set defaults for AWS Platform before the config validation.
 func (a *InstallConfig) finishAWS() error {
-	// Set the Default Edge Compute pool when the subnets are defined.
-	// Edge Compute Pool/AWS Local Zones is supported only when installing in existing VPC.
-	if len(a.Config.Platform.AWS.Subnets) > 0 {
+	// Set the Default Edge Compute pool when the subnets in AWS Local Zones are defined,
+	// when installing a cluster in existing VPC.
+	if len(a.Config.Platform.AWS.VPC.Subnets) > 0 {
 		edgeSubnets, err := a.AWS.EdgeSubnets(context.TODO())
 		if err != nil {
 			return errors.Wrap(err, fmt.Sprintf("unable to load edge subnets: %v", err))
@@ -138,31 +131,35 @@ func (a *InstallConfig) finishAWS() error {
 		if totalEdgeSubnets == 0 {
 			return nil
 		}
-		if edgePool := defaults.CreateEdgeMachinePoolDefaults(a.Config.Compute, a.Config.Platform.Name(), totalEdgeSubnets); edgePool != nil {
+		if edgePool := defaults.CreateEdgeMachinePoolDefaults(a.Config.Compute, &a.Config.Platform, totalEdgeSubnets); edgePool != nil {
 			a.Config.Compute = append(a.Config.Compute, *edgePool)
 		}
 	}
 	return nil
 }
 
-func (a *InstallConfig) finish(filename string) error {
+func (a *InstallConfig) finish(ctx context.Context, filename string) error {
 	if a.Config.AWS != nil {
-		a.AWS = aws.NewMetadata(a.Config.Platform.AWS.Region, a.Config.Platform.AWS.Subnets, a.Config.AWS.ServiceEndpoints)
+		a.AWS = aws.NewMetadata(a.Config.Platform.AWS.Region, a.Config.Platform.AWS.VPC.Subnets, a.Config.AWS.ServiceEndpoints)
 		if err := a.finishAWS(); err != nil {
 			return err
 		}
-	}
-	if a.Config.AlibabaCloud != nil {
-		a.AlibabaCloud = alibabacloud.NewMetadata(a.Config.AlibabaCloud.Region, a.Config.AlibabaCloud.VSwitchIDs)
 	}
 	if a.Config.Azure != nil {
 		a.Azure = icazure.NewMetadata(a.Config.Azure.CloudName, a.Config.Azure.ARMEndpoint)
 	}
 	if a.Config.IBMCloud != nil {
-		a.IBMCloud = icibmcloud.NewMetadata(a.Config.BaseDomain, a.Config.IBMCloud.Region, a.Config.IBMCloud.ControlPlaneSubnets, a.Config.IBMCloud.ComputeSubnets)
+		a.IBMCloud = icibmcloud.NewMetadata(a.Config)
 	}
 	if a.Config.PowerVS != nil {
-		a.PowerVS = icpowervs.NewMetadata(a.Config.BaseDomain)
+		a.PowerVS = icpowervs.NewMetadata(a.Config)
+	}
+	if a.Config.VSphere != nil {
+		a.VSphere = icvsphere.NewMetadata()
+
+		for _, v := range a.Config.VSphere.VCenters {
+			_ = a.VSphere.AddCredentials(v.Server, v.Username, v.Password)
+		}
 	}
 
 	if err := validation.ValidateInstallConfig(a.Config, false).ToAggregate(); err != nil {
@@ -172,24 +169,16 @@ func (a *InstallConfig) finish(filename string) error {
 		return errors.Wrapf(err, "invalid %q file", filename)
 	}
 
-	if err := a.platformValidation(); err != nil {
+	if err := a.platformValidation(ctx); err != nil {
 		return err
 	}
-
 	return a.RecordFile()
 }
 
 // platformValidation runs validations that require connecting to the
 // underlying platform. In some cases, platforms also duplicate validations
 // that have already been checked by validation.ValidateInstallConfig().
-func (a *InstallConfig) platformValidation() error {
-	if a.Config.Platform.AlibabaCloud != nil {
-		client, err := a.AlibabaCloud.Client()
-		if err != nil {
-			return err
-		}
-		return alibabacloud.Validate(client, a.Config)
-	}
+func (a *InstallConfig) platformValidation(ctx context.Context) error {
 	if a.Config.Platform.Azure != nil {
 		client, err := a.Azure.Client()
 		if err != nil {
@@ -198,21 +187,26 @@ func (a *InstallConfig) platformValidation() error {
 		return icazure.Validate(client, a.Config)
 	}
 	if a.Config.Platform.GCP != nil {
-		client, err := icgcp.NewClient(context.TODO())
+		client, err := icgcp.NewClient(ctx, a.Config.GCP.ServiceEndpoints)
 		if err != nil {
 			return err
 		}
 		return icgcp.Validate(client, a.Config)
 	}
 	if a.Config.Platform.IBMCloud != nil {
-		client, err := icibmcloud.NewClient()
+		// Validate the Service Endpoints now, before performing any additional validation of the InstallConfig
+		err := icibmcloud.ValidateServiceEndpoints(a.Config)
+		if err != nil {
+			return err
+		}
+		client, err := icibmcloud.NewClient(a.Config.Platform.IBMCloud.ServiceEndpoints)
 		if err != nil {
 			return err
 		}
 		return icibmcloud.Validate(client, a.Config)
 	}
 	if a.Config.Platform.AWS != nil {
-		return aws.Validate(context.TODO(), a.AWS, a.Config)
+		return aws.Validate(ctx, a.AWS, a.Config)
 	}
 	if a.Config.Platform.VSphere != nil {
 		return icvsphere.Validate(a.Config)
@@ -221,7 +215,7 @@ func (a *InstallConfig) platformValidation() error {
 		return icovirt.Validate(a.Config)
 	}
 	if a.Config.Platform.OpenStack != nil {
-		return icopenstack.Validate(a.Config)
+		return icopenstack.Validate(ctx, a.Config)
 	}
 	if a.Config.Platform.PowerVS != nil {
 		return icpowervs.Validate(a.Config)

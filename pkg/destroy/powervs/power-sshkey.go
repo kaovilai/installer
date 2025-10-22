@@ -1,12 +1,13 @@
 package powervs
 
 import (
+	"context"
+	"fmt"
 	"math"
 	"strings"
 	"time"
 
 	"github.com/IBM-Cloud/power-go-client/power/models"
-	"github.com/pkg/errors"
 	"k8s.io/apimachinery/pkg/util/wait"
 )
 
@@ -16,13 +17,19 @@ const powerSSHKeyTypeName = "powerSshKey"
 func (o *ClusterUninstaller) listPowerSSHKeys() (cloudResources, error) {
 	o.Logger.Debugf("Listing Power SSHKeys")
 
-	ctx, cancel := o.contextWithTimeout()
+	if o.keyClient == nil {
+		o.Logger.Infof("Skipping deleting Power sshkeys because no service instance was found")
+		result := []cloudResource{}
+		return cloudResources{}.insert(result...), nil
+	}
+
+	ctx, cancel := contextWithTimeout()
 	defer cancel()
 
 	select {
 	case <-ctx.Done():
 		o.Logger.Debugf("listPowerSSHKeys: case <-ctx.Done()")
-		return nil, o.Context.Err() // we're cancelled, abort
+		return nil, ctx.Err() // we're cancelled, abort
 	default:
 	}
 
@@ -31,7 +38,7 @@ func (o *ClusterUninstaller) listPowerSSHKeys() (cloudResources, error) {
 
 	sshKeys, err = o.keyClient.GetAll()
 	if err != nil {
-		return nil, errors.Wrapf(err, "failed to list Power sshkeys: %v", err)
+		return nil, fmt.Errorf("failed to list Power sshkeys: %w", err)
 	}
 
 	var sshKey *models.SSHKey
@@ -64,13 +71,13 @@ func (o *ClusterUninstaller) listPowerSSHKeys() (cloudResources, error) {
 func (o *ClusterUninstaller) deletePowerSSHKey(item cloudResource) error {
 	var err error
 
-	ctx, cancel := o.contextWithTimeout()
+	ctx, cancel := contextWithTimeout()
 	defer cancel()
 
 	select {
 	case <-ctx.Done():
 		o.Logger.Debugf("deletePowerSSHKey: case <-ctx.Done()")
-		return o.Context.Err() // we're cancelled, abort
+		return ctx.Err() // we're cancelled, abort
 	default:
 	}
 
@@ -83,7 +90,7 @@ func (o *ClusterUninstaller) deletePowerSSHKey(item cloudResource) error {
 
 	err = o.keyClient.Delete(item.id)
 	if err != nil {
-		return errors.Wrapf(err, "failed to delete Power sshKey %s", item.name)
+		return fmt.Errorf("failed to delete Power sshKey %s: %w", item.name, err)
 	}
 
 	o.Logger.Infof("Deleted Power SSHKey %q", item.name)
@@ -106,14 +113,14 @@ func (o *ClusterUninstaller) destroyPowerSSHKeys() error {
 
 	items := o.insertPendingItems(powerSSHKeyTypeName, firstPassList.list())
 
-	ctx, cancel := o.contextWithTimeout()
+	ctx, cancel := contextWithTimeout()
 	defer cancel()
 
 	for _, item := range items {
 		select {
 		case <-ctx.Done():
 			o.Logger.Debugf("destroyPowerSSHKeys: case <-ctx.Done()")
-			return o.Context.Err() // we're cancelled, abort
+			return ctx.Err() // we're cancelled, abort
 		default:
 		}
 
@@ -122,7 +129,7 @@ func (o *ClusterUninstaller) destroyPowerSSHKeys() error {
 			Factor:   1.1,
 			Cap:      leftInContext(ctx),
 			Steps:    math.MaxInt32}
-		err = wait.ExponentialBackoffWithContext(ctx, backoff, func() (bool, error) {
+		err = wait.ExponentialBackoffWithContext(ctx, backoff, func(context.Context) (bool, error) {
 			err2 := o.deletePowerSSHKey(item)
 			if err2 == nil {
 				return true, err2
@@ -139,7 +146,7 @@ func (o *ClusterUninstaller) destroyPowerSSHKeys() error {
 		for _, item := range items {
 			o.Logger.Debugf("destroyPowerSSHKeys: found %s in pending items", item.name)
 		}
-		return errors.Errorf("destroyPowerSSHKeys: %d undeleted items pending", len(items))
+		return fmt.Errorf("destroyPowerSSHKeys: %d undeleted items pending", len(items))
 	}
 
 	backoff := wait.Backoff{
@@ -147,7 +154,7 @@ func (o *ClusterUninstaller) destroyPowerSSHKeys() error {
 		Factor:   1.1,
 		Cap:      leftInContext(ctx),
 		Steps:    math.MaxInt32}
-	err = wait.ExponentialBackoffWithContext(ctx, backoff, func() (bool, error) {
+	err = wait.ExponentialBackoffWithContext(ctx, backoff, func(context.Context) (bool, error) {
 		secondPassList, err2 := o.listPowerSSHKeys()
 		if err2 != nil {
 			return false, err2

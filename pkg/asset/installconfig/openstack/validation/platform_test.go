@@ -3,10 +3,11 @@ package validation
 import (
 	"testing"
 
-	"github.com/gophercloud/gophercloud/openstack/imageservice/v2/images"
-	"github.com/gophercloud/gophercloud/openstack/networking/v2/extensions/layer3/floatingips"
-	"github.com/gophercloud/gophercloud/openstack/networking/v2/networks"
-	"github.com/gophercloud/gophercloud/openstack/networking/v2/subnets"
+	"github.com/gophercloud/gophercloud/v2/openstack/image/v2/images"
+	"github.com/gophercloud/gophercloud/v2/openstack/networking/v2/extensions/layer3/floatingips"
+	"github.com/gophercloud/gophercloud/v2/openstack/networking/v2/extensions/mtu"
+	"github.com/gophercloud/gophercloud/v2/openstack/networking/v2/networks"
+	"github.com/gophercloud/gophercloud/v2/openstack/networking/v2/subnets"
 	"github.com/stretchr/testify/assert"
 
 	"github.com/openshift/installer/pkg/ipnet"
@@ -19,6 +20,7 @@ var (
 	validExternalNetwork = "valid-external-network"
 	validFIP1            = "128.35.27.8"
 	validFIP2            = "128.35.27.13"
+	validSubnetID        = "031a5b9d-5a89-4465-8d54-3517ec2bad48"
 )
 
 // Returns a default install
@@ -31,27 +33,44 @@ func validPlatform() *openstack.Platform {
 	}
 }
 
+func validControlPlanePort() *openstack.PortTarget {
+	fixedIP := openstack.FixedIP{
+		Subnet: openstack.SubnetFilter{ID: validSubnetID, Name: "valid-subnet"},
+	}
+	controlPlanePort := &openstack.PortTarget{
+		FixedIPs: []openstack.FixedIP{fixedIP},
+	}
+	return controlPlanePort
+}
+
 func validNetworking() *types.Networking {
 	return &types.Networking{}
 }
 
-func withMachinesSubnet(subnetCIDR, allocationPoolStart, allocationPoolEnd string) func(*CloudInfo) {
+func withControlPlanePortSubnets(subnetCIDR, allocationPoolStart, allocationPoolEnd string) func(*CloudInfo) {
 	return func(ci *CloudInfo) {
-		ci.MachinesSubnet = &subnets.Subnet{
+		subnet := subnets.Subnet{
 			CIDR: subnetCIDR,
 			AllocationPools: []subnets.AllocationPool{
 				{Start: allocationPoolStart, End: allocationPoolEnd},
 			},
+			IPVersion: 4,
 		}
+		allSubnets := []*subnets.Subnet{&subnet}
+		ci.ControlPlanePortSubnets = allSubnets
 	}
 }
+
 func validPlatformCloudInfo(options ...func(*CloudInfo)) *CloudInfo {
 	ci := CloudInfo{
-		ExternalNetwork: &networks.Network{
-			ID:           "71b97520-69af-4c35-8153-cdf827z96e60",
-			Name:         validExternalNetwork,
-			AdminStateUp: true,
-			Status:       "ACTIVE",
+		ExternalNetwork: &Network{
+			networks.Network{
+				ID:           "71b97520-69af-4c35-8153-cdf827z96e60",
+				Name:         validExternalNetwork,
+				AdminStateUp: true,
+				Status:       "ACTIVE",
+			},
+			mtu.NetworkMTUExt{},
 		},
 		APIFIP: &floatingips.FloatingIP{
 			ID:     validFIP1,
@@ -219,7 +238,7 @@ func TestOpenStackPlatformValidation(t *testing.T) {
 				p.APIVIPs = []string{"10.0.128.10"}
 				return p
 			}(),
-			cloudInfo: validPlatformCloudInfo(withMachinesSubnet(
+			cloudInfo: validPlatformCloudInfo(withControlPlanePortSubnets(
 				"10.0.128.0/24",
 				"10.0.128.8",
 				"10.0.128.255",
@@ -235,7 +254,7 @@ func TestOpenStackPlatformValidation(t *testing.T) {
 				p.IngressVIPs = []string{"10.0.128.42"}
 				return p
 			}(),
-			cloudInfo: validPlatformCloudInfo(withMachinesSubnet(
+			cloudInfo: validPlatformCloudInfo(withControlPlanePortSubnets(
 				"10.0.128.0/24",
 				"10.0.128.8",
 				"10.0.128.255",
@@ -379,59 +398,80 @@ func TestMachineSubnet(t *testing.T) {
 			name: "external dns is not supported",
 			platform: func() *openstack.Platform {
 				p := validPlatform()
-				p.MachinesSubnet = "031a5b9d-5a89-4465-8d54-3517ec2bad48"
 				p.ExternalDNS = append(p.ExternalDNS, "1.2.3.4")
+				p.ControlPlanePort = validControlPlanePort()
 				return p
 			}(),
 			cloudInfo:      validPlatformCloudInfo(),
 			networking:     validNetworking(),
-			expectedErrMsg: `platform.openstack.externalDNS: Invalid value: \[\]string{"1.2.3.4"}: externalDNS is set, externalDNS is not supported when machinesSubnet is set`,
+			expectedErrMsg: `platform.openstack.externalDNS: Invalid value: \[\]string{"1.2.3.4"}: externalDNS is set, externalDNS is not supported when ControlPlanePort is set`,
 		},
 		{
-			name: "machine subnet not found",
+			name: "control plane port subnet not found",
 			platform: func() *openstack.Platform {
 				p := validPlatform()
-				p.MachinesSubnet = "031a5b9d-5a89-4465-8d54-3517ec2bad48"
+				p.ControlPlanePort = validControlPlanePort()
 				return p
 			}(),
 			cloudInfo: func() *CloudInfo {
 				ci := validPlatformCloudInfo()
-				ci.MachinesSubnet = nil
-				return ci
-			}(),
-			networking:     validNetworking(),
-			expectedErrMsg: `platform.openstack.machinesSubnet: Not found: "031a5b9d-5a89-4465-8d54-3517ec2bad48"`,
-		},
-		{
-			name: "invalid subnet ID",
-			platform: func() *openstack.Platform {
-				p := validPlatform()
-				p.MachinesSubnet = "fake"
-				return p
-			}(),
-			cloudInfo: func() *CloudInfo {
-				ci := validPlatformCloudInfo()
-				ci.MachinesSubnet = &subnets.Subnet{
-					ID: "031a5b9d-5a89-4465-8d54-3517ec2bad48",
+				subnet := subnets.Subnet{
+					ID: "00000000-5a89-4465-8d54-3517ec2bad48",
 				}
+				allSubnets := []*subnets.Subnet{&subnet}
+				ci.ControlPlanePortSubnets = allSubnets
 				return ci
 			}(),
 			networking:     validNetworking(),
-			expectedErrMsg: `platform.openstack.machinesSubnet: Internal error: invalid subnet ID`,
+			expectedErrMsg: `platform.openstack.controlPlanePort.fixedIPs: Not found: "031a5b9d-5a89-4465-8d54-3517ec2bad48"`,
+		},
+		{
+			name: "network does not contain subnets",
+			platform: func() *openstack.Platform {
+				p := validPlatform()
+				p.ControlPlanePort = validControlPlanePort()
+				p.ControlPlanePort.Network.ID = "00000000-2a22-4465-8d54-3517ec2bad48"
+				return p
+			}(),
+			cloudInfo: func() *CloudInfo {
+				ci := validPlatformCloudInfo()
+				subnet := subnets.Subnet{
+					ID:        "031a5b9d-5a89-4465-8d54-3517ec2bad48",
+					NetworkID: "00000000-1a11-4465-8d54-3517ec2bad48",
+					CIDR:      "172.0.0.1/24",
+				}
+				allSubnets := []*subnets.Subnet{&subnet}
+				ci.ControlPlanePortSubnets = allSubnets
+				network := Network{}
+				network.ID = "00000000-2a22-4465-8d54-3517ec2bad48"
+				ci.ControlPlanePortNetwork = &network
+				return ci
+			}(),
+			networking: func() *types.Networking {
+				n := validNetworking()
+				machineNetworkEntry := &types.MachineNetworkEntry{
+					CIDR: *ipnet.MustParseCIDR("172.0.0.1/24"),
+				}
+				n.MachineNetwork = []types.MachineNetworkEntry{*machineNetworkEntry}
+				return n
+			}(),
+			expectedErrMsg: `platform.openstack.controlPlanePort.network: Invalid value: "00000000-2a22-4465-8d54-3517ec2bad48": network must contain subnets`,
 		},
 		{
 			name: "doesn't match the CIDR",
 			platform: func() *openstack.Platform {
 				p := validPlatform()
-				p.MachinesSubnet = "031a5b9d-5a89-4465-8d54-3517ec2bad48"
+				p.ControlPlanePort = validControlPlanePort()
 				return p
 			}(),
 			cloudInfo: func() *CloudInfo {
 				ci := validPlatformCloudInfo()
-				ci.MachinesSubnet = &subnets.Subnet{
-					ID: "031a5b9d-5a89-4465-8d54-3517ec2bad48",
+				subnet := subnets.Subnet{
+					ID:   validSubnetID,
+					CIDR: "172.0.0.1/16",
 				}
-				ci.MachinesSubnet.CIDR = "172.0.0.1/16"
+				allSubnets := []*subnets.Subnet{&subnet}
+				ci.ControlPlanePortSubnets = allSubnets
 				return ci
 			}(),
 			networking: func() *types.Networking {
@@ -442,32 +482,238 @@ func TestMachineSubnet(t *testing.T) {
 				n.MachineNetwork = []types.MachineNetworkEntry{*machineNetworkEntry}
 				return n
 			}(),
-			expectedErrMsg: `platform.openstack.machinesSubnet: Internal error: the first CIDR in machineNetwork, 172.0.0.1/24, doesn't match the CIDR of the machineSubnet, 172.0.0.1/16`,
+			expectedErrMsg: `platform.openstack.controlPlanePort.fixedIPs: Invalid value: "172.0.0.1/16": controlPlanePort CIDR does not match machineNetwork`,
 		},
 		{
-			name: "valid machine subnet",
+			name: "control plane port subnets on different network",
 			platform: func() *openstack.Platform {
 				p := validPlatform()
-				p.MachinesSubnet = "031a5b9d-5a89-4465-8d54-3517ec2bad48"
+				fixedIP := openstack.FixedIP{
+					Subnet: openstack.SubnetFilter{ID: "00000000-5a89-4465-8d54-3517ec2bad48"},
+				}
+				fixedIPv6 := openstack.FixedIP{
+					Subnet: openstack.SubnetFilter{ID: "00000000-1111-4465-8d54-3517ec2bad48"},
+				}
+				p.ControlPlanePort = &openstack.PortTarget{
+					FixedIPs: []openstack.FixedIP{fixedIP, fixedIPv6},
+				}
 				return p
 			}(),
 			cloudInfo: func() *CloudInfo {
 				ci := validPlatformCloudInfo()
-				ci.MachinesSubnet = &subnets.Subnet{
-					ID: "031a5b9d-5a89-4465-8d54-3517ec2bad48",
+				subnet := subnets.Subnet{
+					ID:        "00000000-5a89-4465-8d54-3517ec2bad48",
+					NetworkID: "00000000-2222-4465-8d54-3517ec2bad48",
+					CIDR:      "172.0.0.1/16",
+					IPVersion: 4,
 				}
-				ci.MachinesSubnet.CIDR = "172.0.0.1/24"
+				subnetv6 := subnets.Subnet{
+					ID:        "00000000-1111-4465-8d54-3517ec2bad48",
+					NetworkID: "00000000-3333-4465-8d54-3517ec2bad48",
+					CIDR:      "2001:db8::/64",
+					IPVersion: 6,
+				}
+				allSubnets := []*subnets.Subnet{&subnet, &subnetv6}
+				ci.ControlPlanePortSubnets = allSubnets
 				return ci
 			}(),
 			networking: func() *types.Networking {
 				n := validNetworking()
 				machineNetworkEntry := &types.MachineNetworkEntry{
-					CIDR: *ipnet.MustParseCIDR("172.0.0.1/24"),
+					CIDR: *ipnet.MustParseCIDR("172.0.0.1/16"),
+				}
+				machineNetworkEntryv6 := &types.MachineNetworkEntry{
+					CIDR: *ipnet.MustParseCIDR("2001:db8::/64"),
+				}
+				n.MachineNetwork = []types.MachineNetworkEntry{*machineNetworkEntry, *machineNetworkEntryv6}
+				return n
+			}(),
+			expectedErrMsg: `platform.openstack.controlPlanePort.fixedIPs: Invalid value: "00000000-3333-4465-8d54-3517ec2bad48": fixedIPs subnets must be on the same Network`,
+		},
+		{
+			name: "valid control plane port",
+			platform: func() *openstack.Platform {
+				p := validPlatform()
+				p.ControlPlanePort = validControlPlanePort()
+				return p
+			}(),
+			cloudInfo: func() *CloudInfo {
+				ci := validPlatformCloudInfo()
+				subnet := subnets.Subnet{
+					ID:   validSubnetID,
+					CIDR: "172.0.0.1/16",
+				}
+				allSubnets := []*subnets.Subnet{&subnet}
+				ci.ControlPlanePortSubnets = allSubnets
+				return ci
+			}(),
+			networking: func() *types.Networking {
+				n := validNetworking()
+				machineNetworkEntry := &types.MachineNetworkEntry{
+					CIDR: *ipnet.MustParseCIDR("172.0.0.1/16"),
 				}
 				n.MachineNetwork = []types.MachineNetworkEntry{*machineNetworkEntry}
 				return n
 			}(),
 			expectedErrMsg: "",
+		},
+		{
+			name: "control plane port multiple ipv4 subnets",
+			platform: func() *openstack.Platform {
+				p := validPlatform()
+				fixedIP := openstack.FixedIP{
+					Subnet: openstack.SubnetFilter{ID: "00000000-5a89-4465-8d54-3517ec2bad48"},
+				}
+				fixedIPv6 := openstack.FixedIP{
+					Subnet: openstack.SubnetFilter{ID: "00000000-1111-4465-8d54-3517ec2bad48"},
+				}
+				p.ControlPlanePort = &openstack.PortTarget{
+					FixedIPs: []openstack.FixedIP{fixedIP, fixedIPv6},
+				}
+				return p
+			}(),
+			cloudInfo: func() *CloudInfo {
+				ci := validPlatformCloudInfo()
+				subnet := subnets.Subnet{
+					ID:        "00000000-5a89-4465-8d54-3517ec2bad48",
+					CIDR:      "172.0.0.1/16",
+					IPVersion: 4,
+				}
+				subnetv6 := subnets.Subnet{
+					ID:        "00000000-1111-4465-8d54-3517ec2bad48",
+					CIDR:      "10.0.0.0/16",
+					IPVersion: 4,
+				}
+				allSubnets := []*subnets.Subnet{&subnet, &subnetv6}
+				ci.ControlPlanePortSubnets = allSubnets
+				return ci
+			}(),
+			networking: func() *types.Networking {
+				n := validNetworking()
+				machineNetworkEntry := &types.MachineNetworkEntry{
+					CIDR: *ipnet.MustParseCIDR("172.0.0.1/16"),
+				}
+				n.MachineNetwork = []types.MachineNetworkEntry{*machineNetworkEntry}
+				return n
+			}(),
+			expectedErrMsg: `[platform.openstack.controlPlanePort.fixedIPs: Invalid value: "10.0.0.0/16": controlPlanePort CIDR does not match machineNetwork, platform.openstack.controlPlanePort.fixedIPs: Internal error: one IPv4 subnet and one IPv6 subnet must be specified]`,
+		},
+		{
+			name: "control plane port no ipv4 subnets",
+			platform: func() *openstack.Platform {
+				p := &openstack.Platform{
+					APIVIPs:     []string{"2001:db8:2222:5555:f816:3eff:fe4d:2f08"},
+					Cloud:       validCloud,
+					IngressVIPs: []string{"2001:db8:2222:5555:f816:3eff:fe72:18cf"},
+				}
+				fixedIPv6 := openstack.FixedIP{
+					Subnet: openstack.SubnetFilter{ID: "00000000-1111-4465-8d54-3517ec2bad48"},
+				}
+				p.ControlPlanePort = &openstack.PortTarget{
+					FixedIPs: []openstack.FixedIP{fixedIPv6},
+				}
+				return p
+			}(),
+			cloudInfo: func() *CloudInfo {
+				ci := validPlatformCloudInfo()
+				subnetv6 := subnets.Subnet{
+					ID:        "00000000-1111-4465-8d54-3517ec2bad48",
+					CIDR:      "2001:db8::/64",
+					IPVersion: 6,
+				}
+				allSubnets := []*subnets.Subnet{&subnetv6}
+				ci.ControlPlanePortSubnets = allSubnets
+				return ci
+			}(),
+			networking: func() *types.Networking {
+				n := validNetworking()
+				machineNetworkEntry := &types.MachineNetworkEntry{
+					CIDR: *ipnet.MustParseCIDR("2001:db8::/64"),
+				}
+				n.MachineNetwork = []types.MachineNetworkEntry{*machineNetworkEntry}
+				return n
+			}(),
+			expectedErrMsg: "",
+		},
+		{
+			name: "external network specified on single stack IPv6 cluster",
+			platform: func() *openstack.Platform {
+				p := validPlatform()
+				fixedIPv6 := openstack.FixedIP{
+					Subnet: openstack.SubnetFilter{ID: "00000000-1111-4465-8d54-3517ec2bad48"},
+				}
+				p.ControlPlanePort = &openstack.PortTarget{
+					FixedIPs: []openstack.FixedIP{fixedIPv6},
+				}
+				return p
+			}(),
+			cloudInfo: func() *CloudInfo {
+				ci := validPlatformCloudInfo()
+				subnetv6 := subnets.Subnet{
+					ID:        "00000000-1111-4465-8d54-3517ec2bad48",
+					CIDR:      "2001:db8::/64",
+					IPVersion: 6,
+				}
+				allSubnets := []*subnets.Subnet{&subnetv6}
+				ci.ControlPlanePortSubnets = allSubnets
+				return ci
+			}(),
+			networking: func() *types.Networking {
+				n := validNetworking()
+				machineNetworkEntry := &types.MachineNetworkEntry{
+					CIDR: *ipnet.MustParseCIDR("2001:db8::/64"),
+				}
+				n.MachineNetwork = []types.MachineNetworkEntry{*machineNetworkEntry}
+				return n
+			}(),
+			expectedErrMsg: `platform.openstack.externalNetwork: Invalid value: "valid-external-network": Cannot set external network on Single Stack IPv6 cluster`,
+		},
+		{
+			name: "MTU too low",
+			platform: func() *openstack.Platform {
+				p := validPlatform()
+				fixedIPv6 := openstack.FixedIP{
+					Subnet: openstack.SubnetFilter{ID: "00000000-1111-4465-8d54-3517ec2bad48"},
+				}
+				p.ControlPlanePort = &openstack.PortTarget{
+					FixedIPs: []openstack.FixedIP{fixedIPv6},
+					Network:  openstack.NetworkFilter{ID: "71b97520-69af-4c35-8153-cdf827z96e60"},
+				}
+				return p
+			}(),
+			cloudInfo: func() *CloudInfo {
+				ci := validPlatformCloudInfo()
+				subnetv6 := subnets.Subnet{
+					ID:        "00000000-1111-4465-8d54-3517ec2bad48",
+					CIDR:      "2001:db8::/64",
+					IPVersion: 6,
+					NetworkID: "71b97520-69af-4c35-8153-cdf827z96e60",
+				}
+				allSubnets := []*subnets.Subnet{&subnetv6}
+				ci.ControlPlanePortSubnets = allSubnets
+
+				network := Network{
+					networks.Network{
+						ID:           "71b97520-69af-4c35-8153-cdf827z96e60",
+						Name:         "too-low",
+						AdminStateUp: true,
+						Status:       "ACTIVE",
+						Subnets:      []string{"00000000-1111-4465-8d54-3517ec2bad48"},
+					},
+					mtu.NetworkMTUExt{MTU: 1200},
+				}
+				ci.ControlPlanePortNetwork = &network
+				return ci
+			}(),
+			networking: func() *types.Networking {
+				n := validNetworking()
+				machineNetworkEntry := &types.MachineNetworkEntry{
+					CIDR: *ipnet.MustParseCIDR("2001:db8::/64"),
+				}
+				n.MachineNetwork = []types.MachineNetworkEntry{*machineNetworkEntry}
+				return n
+			}(),
+			expectedErrMsg: "platform.openstack.controlPlanePort.network: Internal error: network should have an MTU of at least 1380",
 		},
 	}
 

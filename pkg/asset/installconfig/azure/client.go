@@ -2,18 +2,21 @@ package azure
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
-	azsku "github.com/Azure/azure-sdk-for-go/profiles/2018-03-01/compute/mgmt/compute"
-	aznetwork "github.com/Azure/azure-sdk-for-go/profiles/2018-03-01/network/mgmt/network"
 	azres "github.com/Azure/azure-sdk-for-go/profiles/2018-03-01/resources/mgmt/resources"
 	azsubs "github.com/Azure/azure-sdk-for-go/profiles/2018-03-01/resources/mgmt/subscriptions"
+	aznetwork "github.com/Azure/azure-sdk-for-go/profiles/2020-09-01/network/mgmt/network"
 	azenc "github.com/Azure/azure-sdk-for-go/profiles/latest/compute/mgmt/compute"
 	azmarketplace "github.com/Azure/azure-sdk-for-go/profiles/latest/marketplaceordering/mgmt/marketplaceordering"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/arm"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
+	azstorage "github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/storage/armstorage"
 	"github.com/Azure/go-autorest/autorest/to"
-	"github.com/pkg/errors"
+	"k8s.io/apimachinery/pkg/util/sets"
 )
 
 //go:generate mockgen -source=./client.go -destination=mock/azureclient_generated.go -package=mock
@@ -21,13 +24,14 @@ import (
 // API represents the calls made to the API.
 type API interface {
 	GetVirtualNetwork(ctx context.Context, resourceGroupName, virtualNetwork string) (*aznetwork.VirtualNetwork, error)
+	CheckIPAddressAvailability(ctx context.Context, resourceGroupName, virtualNetwork, ipAddr string) (*aznetwork.IPAddressAvailabilityResult, error)
 	GetComputeSubnet(ctx context.Context, resourceGroupName, virtualNetwork, subnet string) (*aznetwork.Subnet, error)
 	GetControlPlaneSubnet(ctx context.Context, resourceGroupName, virtualNetwork, subnet string) (*aznetwork.Subnet, error)
 	ListLocations(ctx context.Context) (*[]azsubs.Location, error)
 	GetResourcesProvider(ctx context.Context, resourceProviderNamespace string) (*azres.Provider, error)
-	GetVirtualMachineSku(ctx context.Context, name, region string) (*azsku.ResourceSku, error)
+	GetVirtualMachineSku(ctx context.Context, name, region string) (*azenc.ResourceSku, error)
 	GetVirtualMachineFamily(ctx context.Context, name, region string) (string, error)
-	GetDiskSkus(ctx context.Context, region string) ([]azsku.ResourceSku, error)
+	GetDiskSkus(ctx context.Context, region string) ([]azenc.ResourceSku, error)
 	GetGroup(ctx context.Context, groupName string) (*azres.Group, error)
 	ListResourceIDsByGroup(ctx context.Context, groupName string) ([]string, error)
 	GetStorageEndpointSuffix(ctx context.Context) (string, error)
@@ -38,6 +42,7 @@ type API interface {
 	GetVMCapabilities(ctx context.Context, instanceType, region string) (map[string]string, error)
 	GetAvailabilityZones(ctx context.Context, region string, instanceType string) ([]string, error)
 	GetLocationInfo(ctx context.Context, region string, instanceType string) (*azenc.ResourceSkuLocationInfo, error)
+	CheckIfExistsStorageAccount(ctx context.Context, resourceGroup, storageAccountName, region string) error
 }
 
 // Client makes calls to the Azure API.
@@ -65,10 +70,28 @@ func (c *Client) GetVirtualNetwork(ctx context.Context, resourceGroupName, virtu
 
 	vnet, err := vnetClient.Get(ctx, resourceGroupName, virtualNetwork, "")
 	if err != nil {
-		return nil, errors.Wrapf(err, "failed to get virtual network %s", virtualNetwork)
+		return nil, fmt.Errorf("failed to get virtual network %s: %w", virtualNetwork, err)
 	}
 
 	return &vnet, nil
+}
+
+// CheckIPAddressAvailability checks availability of an IP address in an Azure virtual network.
+func (c *Client) CheckIPAddressAvailability(ctx context.Context, resourceGroupName, virtualNetwork, ipAddr string) (*aznetwork.IPAddressAvailabilityResult, error) {
+	ctx, cancel := context.WithTimeout(ctx, 1*time.Minute)
+	defer cancel()
+
+	vnetClient, err := c.getVirtualNetworksClient(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	availability, err := vnetClient.CheckIPAddressAvailability(ctx, resourceGroupName, virtualNetwork, ipAddr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get azure ip availability: %w", err)
+	}
+
+	return &availability, nil
 }
 
 // getSubnet gets an Azure subnet by name
@@ -83,7 +106,7 @@ func (c *Client) getSubnet(ctx context.Context, resourceGroupName, virtualNetwor
 
 	subnet, err := subnetsClient.Get(ctx, resourceGroupName, virtualNetwork, subNetwork, "")
 	if err != nil {
-		return nil, errors.Wrapf(err, "failed to get subnet %s", subNetwork)
+		return nil, fmt.Errorf("failed to get subnet %s: %w", subNetwork, err)
 	}
 
 	return &subnet, nil
@@ -131,7 +154,7 @@ func (c *Client) ListLocations(ctx context.Context) (*[]azsubs.Location, error) 
 
 	locations, err := subsClient.ListLocations(ctx, c.ssn.Credentials.SubscriptionID)
 	if err != nil {
-		return nil, errors.Wrapf(err, "failed to list locations")
+		return nil, fmt.Errorf("failed to list locations: %w", err)
 	}
 
 	return locations.Value, nil
@@ -156,7 +179,7 @@ func (c *Client) GetResourcesProvider(ctx context.Context, resourceProviderNames
 
 	provider, err := providersClient.Get(ctx, resourceProviderNamespace, "")
 	if err != nil {
-		return nil, errors.Wrapf(err, "failed to get resource provider %s", resourceProviderNamespace)
+		return nil, fmt.Errorf("failed to get resource provider %s: %w", resourceProviderNamespace, err)
 	}
 
 	return &provider, nil
@@ -170,17 +193,25 @@ func (c *Client) getProvidersClient(ctx context.Context) (azres.ProvidersClient,
 }
 
 // GetDiskSkus returns all the disk SKU pages for a given region.
-func (c *Client) GetDiskSkus(ctx context.Context, region string) ([]azsku.ResourceSku, error) {
-	client := azsku.NewResourceSkusClientWithBaseURI(c.ssn.Environment.ResourceManagerEndpoint, c.ssn.Credentials.SubscriptionID)
+func (c *Client) GetDiskSkus(ctx context.Context, region string) ([]azenc.ResourceSku, error) {
+	client := azenc.NewResourceSkusClientWithBaseURI(c.ssn.Environment.ResourceManagerEndpoint, c.ssn.Credentials.SubscriptionID)
 	client.Authorizer = c.ssn.Authorizer
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	// See https://issues.redhat.com/browse/OCPBUGS-29469 before changing this timeout
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 
-	var sku []azsku.ResourceSku
-
-	for skuPage, err := client.List(ctx); skuPage.NotDone(); err = skuPage.NextWithContext(ctx) {
+	var sku []azenc.ResourceSku
+	filter := fmt.Sprintf("location eq '%s'", region)
+	// This has to be initialized outside the `for` because we need access to
+	// `err`. If initialized in the loop and the API call fails right away,
+	// `page.NotDone()` will return `false` and we'll never check for the error
+	skuPage, err := client.List(ctx, filter, "false")
+	if err != nil {
+		return nil, fmt.Errorf("failed to list SKUs: %w", err)
+	}
+	for ; skuPage.NotDone(); err = skuPage.NextWithContext(ctx) {
 		if err != nil {
-			return nil, errors.Wrap(err, "error fetching SKU pages")
+			return nil, fmt.Errorf("error fetching SKU pages: %w", err)
 		}
 		for _, page := range skuPage.Values() {
 			for _, diskRegion := range to.StringSlice(page.Locations) {
@@ -195,7 +226,7 @@ func (c *Client) GetDiskSkus(ctx context.Context, region string) ([]azsku.Resour
 		return sku, nil
 	}
 
-	return nil, errors.Errorf("no disks for specified subscription in region %s", region)
+	return nil, fmt.Errorf("no disks for specified subscription in region %s", region)
 }
 
 // GetGroup returns resource group for the groupName.
@@ -207,7 +238,7 @@ func (c *Client) GetGroup(ctx context.Context, groupName string) (*azres.Group, 
 
 	res, err := client.Get(ctx, groupName)
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to get resource group")
+		return nil, fmt.Errorf("failed to get resource group: %w", err)
 	}
 	return &res, nil
 }
@@ -220,9 +251,13 @@ func (c *Client) ListResourceIDsByGroup(ctx context.Context, groupName string) (
 	defer cancel()
 
 	var res []string
-	for resPage, err := client.ListByResourceGroup(ctx, groupName, "", "", nil); resPage.NotDone(); err = resPage.NextWithContext(ctx) {
+	resPage, err := client.ListByResourceGroup(ctx, groupName, "", "", nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list resources: %w", err)
+	}
+	for ; resPage.NotDone(); err = resPage.NextWithContext(ctx) {
 		if err != nil {
-			return nil, errors.Wrap(err, "error fetching resource pages")
+			return nil, fmt.Errorf("error fetching resource pages: %w", err)
 		}
 		for _, page := range resPage.Values() {
 			res = append(res, to.String(page.ID))
@@ -232,15 +267,25 @@ func (c *Client) ListResourceIDsByGroup(ctx context.Context, groupName string) (
 }
 
 // GetVirtualMachineSku retrieves the resource SKU of a specified virtual machine SKU in the specified region.
-func (c *Client) GetVirtualMachineSku(ctx context.Context, name, region string) (*azsku.ResourceSku, error) {
-	client := azsku.NewResourceSkusClientWithBaseURI(c.ssn.Environment.ResourceManagerEndpoint, c.ssn.Credentials.SubscriptionID)
+func (c *Client) GetVirtualMachineSku(ctx context.Context, name, region string) (*azenc.ResourceSku, error) {
+	client := azenc.NewResourceSkusClientWithBaseURI(c.ssn.Environment.ResourceManagerEndpoint, c.ssn.Credentials.SubscriptionID)
 	client.Authorizer = c.ssn.Authorizer
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+
+	// See https://issues.redhat.com/browse/OCPBUGS-29469 before chaging this timeout
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 
-	for page, err := client.List(ctx); page.NotDone(); err = page.NextWithContext(ctx) {
+	filter := fmt.Sprintf("location eq '%s'", region)
+	// This has to be initialized outside the `for` because we need access to
+	// `err`. If initialized in the loop and the API call fails right away,
+	// `page.NotDone()` will return `false` and we'll never check for the error
+	page, err := client.List(ctx, filter, "false")
+	if err != nil {
+		return nil, fmt.Errorf("failed to list SKUs: %w", err)
+	}
+	for ; page.NotDone(); err = page.NextWithContext(ctx) {
 		if err != nil {
-			return nil, errors.Wrap(err, "error fetching SKU pages")
+			return nil, fmt.Errorf("error fetching SKU pages: %w", err)
 		}
 		for _, sku := range page.Values() {
 			// Filter out resources that are not virtualMachines
@@ -259,6 +304,7 @@ func (c *Client) GetVirtualMachineSku(ctx context.Context, name, region string) 
 			}
 		}
 	}
+
 	return nil, nil
 }
 
@@ -271,7 +317,7 @@ func (c *Client) GetDiskEncryptionSet(ctx context.Context, subscriptionID, group
 
 	diskEncryptionSet, err := client.Get(ctx, groupName, diskEncryptionSetName)
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to get disk encryption set")
+		return nil, fmt.Errorf("failed to get disk encryption set: %w", err)
 	}
 
 	return &diskEncryptionSet, nil
@@ -281,7 +327,7 @@ func (c *Client) GetDiskEncryptionSet(ctx context.Context, subscriptionID, group
 func (c *Client) GetVirtualMachineFamily(ctx context.Context, name, region string) (string, error) {
 	typeMeta, err := c.GetVirtualMachineSku(ctx, name, region)
 	if err != nil {
-		return "", fmt.Errorf("error connecting to Azure client: %v", err)
+		return "", fmt.Errorf("error connecting to Azure client: %w", err)
 	}
 	if typeMeta == nil {
 		return "", fmt.Errorf("not found in region %s", region)
@@ -298,7 +344,7 @@ func (c *Client) GetVirtualMachineFamily(ctx context.Context, name, region strin
 func (c *Client) GetVMCapabilities(ctx context.Context, instanceType, region string) (map[string]string, error) {
 	typeMeta, err := c.GetVirtualMachineSku(ctx, instanceType, region)
 	if err != nil {
-		return nil, fmt.Errorf("error connecting to Azure client: %v", err)
+		return nil, fmt.Errorf("error connecting to Azure client: %w", err)
 	}
 	if typeMeta == nil {
 		return nil, fmt.Errorf("not found in region %s", region)
@@ -330,7 +376,10 @@ func (c *Client) GetMarketplaceImage(ctx context.Context, region, publisher, off
 	defer cancel()
 
 	image, err := client.Get(ctx, region, publisher, offer, sku, version)
-	return image, errors.Wrap(err, "could not get marketplace image")
+	if err != nil {
+		return image, fmt.Errorf("could not get marketplace image: %w", err)
+	}
+	return image, nil
 }
 
 // AreMarketplaceImageTermsAccepted tests whether the terms have been accepted for the specified marketplace VM image.
@@ -372,7 +421,11 @@ func (c *Client) GetLocationInfo(ctx context.Context, region string, instanceTyp
 
 	// Only supported filter atm is `location`
 	filter := fmt.Sprintf("location eq '%s'", region)
-	for res, err := client.List(ctx, filter, "false"); res.NotDone(); err = res.NextWithContext(ctx) {
+	res, err := client.List(ctx, filter, "false")
+	if err != nil {
+		return nil, fmt.Errorf("failed to list SKUs: %w", err)
+	}
+	for ; res.NotDone(); err = res.NextWithContext(ctx) {
 		if err != nil {
 			return nil, err
 		}
@@ -390,4 +443,33 @@ func (c *Client) GetLocationInfo(ctx context.Context, region string, instanceTyp
 	}
 
 	return nil, fmt.Errorf("location information not found for %s in %s", instanceType, region)
+}
+
+// CheckIfExistsStorageAccount checks if the storage account provided already exists for diagnostics
+// purposes.
+func (c *Client) CheckIfExistsStorageAccount(ctx context.Context, resourceGroup, storageAccountName, region string) error {
+	accountClientOptions := arm.ClientOptions{
+		ClientOptions: policy.ClientOptions{
+			// NOTE: the api version must support AzureStack
+			APIVersion: "2019-04-01",
+			Cloud:      c.ssn.CloudConfig,
+		},
+	}
+	storageClient, err := azstorage.NewAccountsClient(c.ssn.Credentials.SubscriptionID, c.ssn.TokenCreds, &accountClientOptions)
+	if err != nil {
+		return err
+	}
+	resp, err := storageClient.GetProperties(ctx, resourceGroup, storageAccountName, nil)
+	if err != nil {
+		return err
+	}
+	if resp.Account.Name != nil && region != *resp.Account.Location {
+		return fmt.Errorf("%s is an invalid location for storage account. must be in the same region as the cluster", *resp.Account.Location)
+	}
+	validSKUs := sets.NewString(string(azstorage.SKUNameStandardGRS), string(azstorage.SKUNameStandardRAGRS), string(azstorage.SKUNameStandardLRS))
+	if resp.Account.SKU != nil && resp.Account.SKU.Name != nil && !validSKUs.Has(string(*resp.Account.SKU.Name)) {
+		stringSKUs := validSKUs.List()
+		return fmt.Errorf("%s is not supported, supported values are %s,%s,%s", string(*resp.Account.SKU.Name), stringSKUs[0], stringSKUs[1], stringSKUs[2])
+	}
+	return err
 }

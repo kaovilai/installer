@@ -15,19 +15,23 @@ import (
 	"text/template"
 	"time"
 
-	"github.com/containers/image/pkg/sysregistriesv2"
+	"github.com/containers/image/v5/pkg/sysregistriesv2"
 	ignutil "github.com/coreos/ignition/v2/config/util"
 	igntypes "github.com/coreos/ignition/v2/config/v3_2/types"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"github.com/vincent-petithory/dataurl"
 	utilsnet "k8s.io/utils/net"
+	"k8s.io/utils/ptr"
 
 	configv1 "github.com/openshift/api/config/v1"
 	"github.com/openshift/installer/data"
 	"github.com/openshift/installer/pkg/asset"
 	"github.com/openshift/installer/pkg/asset/ignition"
+	"github.com/openshift/installer/pkg/asset/ignition/bootstrap/aws"
+	"github.com/openshift/installer/pkg/asset/ignition/bootstrap/azure"
 	"github.com/openshift/installer/pkg/asset/ignition/bootstrap/baremetal"
+	"github.com/openshift/installer/pkg/asset/ignition/bootstrap/gcp"
 	"github.com/openshift/installer/pkg/asset/ignition/bootstrap/vsphere"
 	mcign "github.com/openshift/installer/pkg/asset/ignition/machine"
 	"github.com/openshift/installer/pkg/asset/installconfig"
@@ -38,7 +42,11 @@ import (
 	"github.com/openshift/installer/pkg/asset/rhcos"
 	"github.com/openshift/installer/pkg/asset/tls"
 	"github.com/openshift/installer/pkg/types"
+	awstypes "github.com/openshift/installer/pkg/types/aws"
+	aztypes "github.com/openshift/installer/pkg/types/azure"
 	baremetaltypes "github.com/openshift/installer/pkg/types/baremetal"
+	gcptypes "github.com/openshift/installer/pkg/types/gcp"
+	nutanixtypes "github.com/openshift/installer/pkg/types/nutanix"
 	vspheretypes "github.com/openshift/installer/pkg/types/vsphere"
 )
 
@@ -50,14 +58,17 @@ var (
 	commonEnabledServices = []string{
 		"progress.service",
 		"kubelet.service",
-		"chown-gatewayd-key.service",
-		"systemd-journal-gatewayd.socket",
 		"approve-csr.service",
 		// baremetal & openstack platform services
 		"keepalived.service",
 		"coredns.service",
 		"ironic.service",
 		"master-bmh-update.service",
+	}
+
+	rhcosEnabledServices = []string{
+		"chown-gatewayd-key.service",
+		"systemd-journal-gatewayd.socket",
 	}
 )
 
@@ -78,20 +89,24 @@ type bootstrapTemplateData struct {
 	BootstrapInPlace      *types.BootstrapInPlace
 	UseIPv6ForNodeIP      bool
 	UseDualForNodeIP      bool
-	IsFCOS                bool
 	IsSCOS                bool
 	IsOKD                 bool
 	BootstrapNodeIP       string
 	APIServerURL          string
 	APIIntServerURL       string
 	FeatureSet            configv1.FeatureSet
+	Invoker               string
+	ClusterDomain         string
 }
 
 // platformTemplateData is the data to use to replace values in bootstrap
 // template files that are specific to one platform.
 type platformTemplateData struct {
+	AWS       *aws.TemplateData
+	Azure     *azure.TemplateData
 	BareMetal *baremetal.TemplateData
 	VSphere   *vsphere.TemplateData
+	GCP       *gcp.TemplateData
 }
 
 // Common is an asset that generates the ignition config for bootstrap nodes.
@@ -106,12 +121,14 @@ func (a *Common) Dependencies() []asset.Asset {
 		&baremetal.IronicCreds{},
 		&CVOIgnore{},
 		&installconfig.InstallConfig{},
+		&installconfig.ClusterID{},
 		&kubeconfig.AdminInternalClient{},
 		&kubeconfig.Kubelet{},
 		&kubeconfig.LoopbackClient{},
 		&mcign.MasterIgnitionCustomizations{},
 		&mcign.WorkerIgnitionCustomizations{},
 		&machines.Master{},
+		&machines.Arbiter{},
 		&machines.Worker{},
 		&manifests.Manifests{},
 		&manifests.Openshift{},
@@ -153,6 +170,7 @@ func (a *Common) Dependencies() []asset.Asset {
 		&tls.MCSCertKey{},
 		&tls.RootCA{},
 		&tls.ServiceAccountKeyPair{},
+		&tls.IronicTLSCert{},
 		&releaseimage.Image{},
 		new(rhcos.Image),
 	}
@@ -162,7 +180,8 @@ func (a *Common) Dependencies() []asset.Asset {
 func (a *Common) generateConfig(dependencies asset.Parents, templateData *bootstrapTemplateData) error {
 	installConfig := &installconfig.InstallConfig{}
 	bootstrapSSHKeyPair := &tls.BootstrapSSHKeyPair{}
-	dependencies.Get(installConfig, bootstrapSSHKeyPair)
+	clusterID := &installconfig.ClusterID{}
+	dependencies.Get(installConfig, bootstrapSSHKeyPair, clusterID)
 
 	a.Config = &igntypes.Config{
 		Ignition: igntypes.Ignition{
@@ -173,8 +192,13 @@ func (a *Common) generateConfig(dependencies asset.Parents, templateData *bootst
 	if err := AddStorageFiles(a.Config, "/", "bootstrap/files", templateData); err != nil {
 		return err
 	}
-	if err := AddSystemdUnits(a.Config, "bootstrap/systemd/units", templateData, commonEnabledServices); err != nil {
+	if err := AddSystemdUnits(a.Config, "bootstrap/systemd/common/units", templateData, commonEnabledServices); err != nil {
 		return err
+	}
+	if !templateData.IsOKD {
+		if err := AddSystemdUnits(a.Config, "bootstrap/systemd/rhcos/units", templateData, rhcosEnabledServices); err != nil {
+			return err
+		}
 	}
 
 	// Check for optional platform specific files/units
@@ -207,6 +231,28 @@ func (a *Common) generateConfig(dependencies asset.Parents, templateData *bootst
 			igntypes.SSHAuthorizedKey(string(bootstrapSSHKeyPair.Public())),
 		}},
 	)
+
+	switch platform {
+	case nutanixtypes.Name:
+		// Inserts the file "/etc/hostname" with the bootstrap machine name to the bootstrap ignition data
+		hostname := fmt.Sprintf("%s-bootstrap", clusterID.InfraID)
+		hostnameFile := igntypes.File{
+			Node: igntypes.Node{
+				Path:      "/etc/hostname",
+				Overwrite: ptr.To(true),
+			},
+			FileEmbedded1: igntypes.FileEmbedded1{
+				Mode: ptr.To(420),
+				Contents: igntypes.Resource{
+					Source: ptr.To(dataurl.EncodeBytes([]byte(hostname))),
+				},
+			},
+		}
+		a.Config.Storage.Files = append(a.Config.Storage.Files, hostnameFile)
+	case aztypes.Name:
+		// See https://issues.redhat.com/browse/OCPBUGS-43625
+		ignition.AppendVarPartition(a.Config)
+	}
 
 	return nil
 }
@@ -248,7 +294,13 @@ func (a *Common) getTemplateData(dependencies asset.Parents, bootstrapInPlace bo
 	}
 
 	registries := []sysregistriesv2.Registry{}
-	for _, group := range MergedMirrorSets(installConfig.Config.ImageContentSources) {
+	digestMirrorSources := []types.ImageDigestSource{}
+	if len(installConfig.Config.DeprecatedImageContentSources) > 0 {
+		digestMirrorSources = ContentSourceToDigestMirror(installConfig.Config.DeprecatedImageContentSources)
+	} else if len(installConfig.Config.ImageDigestSources) > 0 {
+		digestMirrorSources = append(digestMirrorSources, installConfig.Config.ImageDigestSources...)
+	}
+	for _, group := range MergedMirrorSets(digestMirrorSources) {
 		if len(group.Mirrors) == 0 {
 			continue
 		}
@@ -265,9 +317,26 @@ func (a *Common) getTemplateData(dependencies asset.Parents, bootstrapInPlace bo
 	// Generate platform-specific bootstrap data
 	var platformData platformTemplateData
 
+	controlPlaneReplicas := *installConfig.Config.ControlPlane.Replicas
+	if installConfig.Config.Arbiter != nil {
+		controlPlaneReplicas += *installConfig.Config.Arbiter.Replicas
+	}
 	switch installConfig.Config.Platform.Name() {
+	case awstypes.Name:
+		platformData.AWS = aws.GetTemplateData(installConfig.Config.Platform.AWS)
+	case aztypes.Name:
+		platformData.Azure = azure.GetTemplateData(installConfig.Config.Platform.Azure)
 	case baremetaltypes.Name:
-		platformData.BareMetal = baremetal.GetTemplateData(installConfig.Config.Platform.BareMetal, installConfig.Config.MachineNetwork, ironicCreds.Username, ironicCreds.Password)
+		platformData.BareMetal = baremetal.GetTemplateData(
+			installConfig.Config.Platform.BareMetal,
+			installConfig.Config.MachineNetwork,
+			controlPlaneReplicas,
+			ironicCreds.Username,
+			ironicCreds.Password,
+			dependencies,
+		)
+	case gcptypes.Name:
+		platformData.GCP = gcp.GetTemplateData(installConfig.Config.Platform.GCP)
 	case vspheretypes.Name:
 		platformData.VSphere = vsphere.GetTemplateData(installConfig.Config.Platform.VSphere)
 	}
@@ -278,15 +347,15 @@ func (a *Common) getTemplateData(dependencies asset.Parents, bootstrapInPlace bo
 		bootstrapNodeIP = ""
 	}
 
-	platformFirstAPIVIP := firstAPIVIP(&installConfig.Config.Platform)
-	APIIntVIPonIPv6 := utilsnet.IsIPv6String(platformFirstAPIVIP)
-
-	networkStack := 0
-	for _, snet := range installConfig.Config.ServiceNetwork {
-		if snet.IP.To4() != nil {
-			networkStack |= 1
+	var hasIPv4, hasIPv6, ipv6Primary bool
+	for i, snet := range installConfig.Config.ServiceNetwork {
+		if utilsnet.IsIPv4(snet.IP) {
+			hasIPv4 = true
 		} else {
-			networkStack |= 2
+			hasIPv6 = true
+			if i == 0 {
+				ipv6Primary = true
+			}
 		}
 	}
 
@@ -303,6 +372,9 @@ func (a *Common) getTemplateData(dependencies asset.Parents, bootstrapInPlace bo
 
 	apiURL := fmt.Sprintf("api.%s", installConfig.Config.ClusterDomain())
 	apiIntURL := fmt.Sprintf("api-int.%s", installConfig.Config.ClusterDomain())
+
+	openshiftInstallInvoker := os.Getenv("OPENSHIFT_INSTALL_INVOKER")
+
 	return &bootstrapTemplateData{
 		AdditionalTrustBundle: installConfig.Config.AdditionalTrustBundle,
 		FIPS:                  installConfig.Config.FIPS,
@@ -312,19 +384,20 @@ func (a *Common) getTemplateData(dependencies asset.Parents, bootstrapInPlace bo
 		EtcdCluster:           strings.Join(etcdEndpoints, ","),
 		Proxy:                 &proxy.Config.Status,
 		Registries:            registries,
-		BootImage:             string(*rhcosImage),
+		BootImage:             rhcosImage.ControlPlane,
 		PlatformData:          platformData,
 		ClusterProfile:        clusterProfile,
 		BootstrapInPlace:      bootstrapInPlaceConfig,
-		UseIPv6ForNodeIP:      APIIntVIPonIPv6,
-		UseDualForNodeIP:      networkStack == 3,
-		IsFCOS:                installConfig.Config.IsFCOS(),
+		UseIPv6ForNodeIP:      ipv6Primary,
+		UseDualForNodeIP:      hasIPv4 && hasIPv6,
 		IsSCOS:                installConfig.Config.IsSCOS(),
 		IsOKD:                 installConfig.Config.IsOKD(),
 		BootstrapNodeIP:       bootstrapNodeIP,
 		APIServerURL:          apiURL,
 		APIIntServerURL:       apiIntURL,
 		FeatureSet:            installConfig.Config.FeatureSet,
+		Invoker:               openshiftInstallInvoker,
+		ClusterDomain:         installConfig.Config.ClusterDomain(),
 	}
 }
 
@@ -372,16 +445,22 @@ func AddStorageFiles(config *igntypes.Config, base string, uri string, templateD
 	}
 
 	filename := path.Base(uri)
+	filename = strings.TrimSuffix(filename, ".template")
 	parentDir := path.Base(path.Dir(uri))
 
 	var mode int
 	appendToFile := false
-	if parentDir == "bin" || parentDir == "dispatcher.d" {
+	switch {
+	case parentDir == "bin", parentDir == "dispatcher.d", parentDir == "system-generators":
 		mode = 0555
-	} else if filename == "motd" || filename == "containers.conf" {
+	case filename == "motd", filename == "containers.conf":
 		mode = 0644
 		appendToFile = true
-	} else {
+	case filename == "registries.conf":
+		// Having the mode be private breaks rpm-ostree, xref
+		// https://github.com/openshift/installer/pull/6789
+		mode = 0644
+	default:
 		mode = 0600
 	}
 	ign := ignition.FileFromBytes(strings.TrimSuffix(base, ".template"), "root", mode, data)
@@ -493,6 +572,11 @@ func AddSystemdUnits(config *igntypes.Config, uri string, templateData interface
 	return nil
 }
 
+// replace is an utilitary function to do string replacement in templates.
+func replace(input, from, to string) string {
+	return strings.ReplaceAll(input, from, to)
+}
+
 // Read data from the string reader, and, if the name ends with
 // '.template', strip that extension from the name and render the
 // template.
@@ -504,7 +588,7 @@ func readFile(name string, reader io.Reader, templateData interface{}) (finalNam
 
 	if filepath.Ext(name) == ".template" {
 		name = strings.TrimSuffix(name, ".template")
-		tmpl := template.New(name)
+		tmpl := template.New(name).Funcs(template.FuncMap{"replace": replace})
 		tmpl, err := tmpl.Parse(string(data))
 		if err != nil {
 			return name, data, err
@@ -523,6 +607,7 @@ func (a *Common) addParentFiles(dependencies asset.Parents) {
 		&manifests.Manifests{},
 		&manifests.Openshift{},
 		&machines.Master{},
+		&machines.Arbiter{},
 		&machines.Worker{},
 		&mcign.MasterIgnitionCustomizations{},
 		&mcign.WorkerIgnitionCustomizations{},
@@ -532,6 +617,15 @@ func (a *Common) addParentFiles(dependencies asset.Parents) {
 
 		// Replace files that already exist in the slice with ones added later, otherwise append them
 		for _, file := range ignition.FilesFromAsset(rootDir, "root", 0644, asset) {
+			// We limit read access to the fencing secrets
+			match, err := machines.IsFencingCredentialsFile(file.Path)
+			if err != nil {
+				logrus.Warnf("failed regex scan for fencing secrets during ignition files creation: %s", err.Error())
+			} else if match {
+				logrus.Debugf("Setting file mode to 0600 for file: %s", file.Path)
+				file.Mode = ptr.To(0600)
+			}
+
 			a.Config.Storage.Files = replaceOrAppend(a.Config.Storage.Files, file)
 		}
 	}
@@ -576,6 +670,7 @@ func (a *Common) addParentFiles(dependencies asset.Parents) {
 		&tls.MCSCertKey{},
 		&tls.ServiceAccountKeyPair{},
 		&tls.JournalCertKey{},
+		&tls.IronicTLSCert{},
 	} {
 		dependencies.Get(asset)
 
@@ -625,12 +720,16 @@ func (a *Common) load(f asset.FileFetcher, filename string) (found bool, err err
 	}
 
 	a.File, a.Config = file, config
-	warnIfCertificatesExpired(a.Config)
-	return true, nil
+	err = warnIfCertificatesExpired(a.Config)
+	if err != nil {
+		logrus.Warnf("Please regenerate ignition configuration files in a new directory.")
+	}
+
+	return true, err
 }
 
 // warnIfCertificatesExpired checks for expired certificates and warns if so
-func warnIfCertificatesExpired(config *igntypes.Config) {
+func warnIfCertificatesExpired(config *igntypes.Config) error {
 	expiredCerts := 0
 	for _, file := range config.Storage.Files {
 		if filepath.Ext(file.Path) == ".crt" && file.Contents.Source != nil {
@@ -650,7 +749,7 @@ func warnIfCertificatesExpired(config *igntypes.Config) {
 				cert, err := x509.ParseCertificate(block.Bytes)
 				if err == nil {
 					if time.Now().UTC().After(cert.NotAfter) {
-						logrus.Warnf("Bootstrap Ignition-Config Certificate %s expired at %s.", path.Base(file.Path), cert.NotAfter.Format(time.RFC3339))
+						logrus.Errorf("Bootstrap Ignition-Config Certificate %s expired at %s.", path.Base(file.Path), cert.NotAfter.Format(time.RFC3339))
 						expiredCerts++
 					}
 				} else {
@@ -664,37 +763,7 @@ func warnIfCertificatesExpired(config *igntypes.Config) {
 	}
 
 	if expiredCerts > 0 {
-		logrus.Warnf("Bootstrap Ignition-Config: %d certificates expired. Installation attempts with the created Ignition-Configs will possibly fail.", expiredCerts)
+		return fmt.Errorf("%d certificates expired", expiredCerts)
 	}
-}
-
-// APIVIPs returns the string representations of the platform's API VIPs
-// It returns nil if the platform does not configure VIPs
-func apiVIPs(p *types.Platform) []string {
-	switch {
-	case p == nil:
-		return nil
-	case p.BareMetal != nil:
-		return p.BareMetal.APIVIPs
-	case p.OpenStack != nil:
-		return p.OpenStack.APIVIPs
-	case p.VSphere != nil:
-		return p.VSphere.APIVIPs
-	case p.Ovirt != nil:
-		return p.Ovirt.APIVIPs
-	case p.Nutanix != nil:
-		return p.Nutanix.APIVIPs
-	default:
-		return nil
-	}
-}
-
-// firstAPIVIP returns the first VIP of the API server (e.g. in case of
-// dual-stack)
-func firstAPIVIP(p *types.Platform) string {
-	for _, vip := range apiVIPs(p) {
-		return vip
-	}
-
-	return ""
+	return nil
 }

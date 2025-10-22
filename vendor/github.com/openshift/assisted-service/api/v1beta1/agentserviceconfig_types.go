@@ -102,16 +102,74 @@ type AgentServiceConfigSpec struct {
 	// +kubebuilder:validation:default:=disabled
 	// +optional
 	IPXEHTTPRoute string `json:"iPXEHTTPRoute,omitempty"`
+	// UnauthenticatedRegistries is a list of registries from which container images can be pulled
+	// without authentication. They will be appended to the default list (quay.io,
+	// registry.ci.openshift.org). Any registry on this list will not require credentials
+	// to be in the pull secret validated by the assisted-service.
+	//+operator-sdk:csv:customresourcedefinitions:type=spec,displayName="List of container registries without authentication"
+	// +optional
+	UnauthenticatedRegistries []string `json:"unauthenticatedRegistries,omitempty"`
+
+	// OSImageCACertRef is a reference to a config map containing a certificate authority certificate
+	// this is an optional certificate to allow a user to add a certificate authority for a HTTPS source of images
+	// this certificate will be used by the assisted-image-service when pulling OS images.
+	//+operator-sdk:csv:customresourcedefinitions:type=spec,displayName="OS Image CA Cert ConfigMap reference"
+	// +optional
+	OSImageCACertRef *corev1.LocalObjectReference `json:"OSImageCACertRef,omitempty"`
+
+	// OSImageAdditionalParamsRef is a reference to a secret containing a headers and query parameters to be used during OS image fetch.
+	//+operator-sdk:csv:customresourcedefinitions:type=spec,displayName="OS Images additional parameters reference"
+	// +optional
+	OSImageAdditionalParamsRef *corev1.LocalObjectReference `json:"OSImageAdditionalParamsRef,omitempty"`
+
+	// Ingress contains configuration for the ingress resources.
+	// Has no effect when running on an OpenShift cluster.
+	//+operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Ingress"
+	// +optional
+	Ingress *Ingress `json:"ingress,omitempty"`
 }
+
+type Ingress struct {
+	// AssistedServiceHostname is the hostname to be assigned to the assisted-service ingress.
+	// Has no effect when running on an OpenShift cluster.
+	//+operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Assisted Service hostname"
+	AssistedServiceHostname string `json:"assistedServiceHostname"`
+
+	// ImageServiceHostname is the hostname to be assigned to the assisted-image-service ingress.
+	// Has no effect when running on an OpenShift cluster.
+	//+operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Assisted Image Service hostname"
+	ImageServiceHostname string `json:"imageServiceHostname"`
+
+	// ClassName is the name of the ingress class to be used when configuring ingress resources.
+	// Has no effect when running on an OpenShift cluster.
+	//+operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Class Name"
+	// +optional
+	ClassName *string `json:"className,omitempty"`
+}
+
+// Annotations
+const (
+	PVCPrefixAnnotation     = "unsupported.agent-install.openshift.io/assisted-service-pvc-prefix"
+	SecretsPrefixAnnotation = "unsupported.agent-install.openshift.io/assisted-service-secrets-prefix"
+)
 
 // ConditionType related to our reconcile loop in addition to all the reasons
 // why ConditionStatus could be true or false.
 const (
+	// ConditionReconcileCompleted reports on whether or not the local cluster is managed.
+	ConditionLocalClusterManaged conditionsv1.ConditionType = "LocalClusterManaged"
 	// ConditionReconcileCompleted reports whether reconcile completed without error.
 	ConditionReconcileCompleted conditionsv1.ConditionType = "ReconcileCompleted"
 	// ConditionDeploymentsHealthy reports whether deployments are healthy.
 	ConditionDeploymentsHealthy conditionsv1.ConditionType = "DeploymentsHealthy"
-
+	// ReasonLocalClusterImportNotEnabled when the import of local cluster is not enabled.
+	ReasonLocalClusterImportNotEnabled string = "Local cluster import is not enabled"
+	// ReasonLocalClusterEntitiesCreated when the local cluster is managed.
+	ReasonLocalClusterManaged string = "Local cluster is managed."
+	// ReasonLocalClusterEntitiesRemoved when the local cluster is not managed.
+	ReasonLocalClusterNotManaged string = "Local cluster is not managed."
+	// ReasonUnableToDetermineLocalClusterManagedStatus when unable to determine the status of local cluster entities.
+	ReasonUnableToDetermineLocalClusterManagedStatus string = "Unable to determine local cluster managed status."
 	// ReasonReconcileSucceeded when the reconcile completes all operations without error.
 	ReasonReconcileSucceeded string = "ReconcileSucceeded"
 	// ReasonDeploymentSucceeded when configuring/deploying the assisted-service deployment completed without errors.
@@ -154,20 +212,49 @@ const (
 	ReasonWebHookClusterRoleBindingFailure string = "ReasonWebHookClusterRoleBindingFailure"
 	// ReasonWebHookClusterRoleFailure when there was a failure configuring/deploying the webhook cluster role.
 	ReasonWebHookClusterRoleFailure string = "ReasonWebHookClusterRoleFailure"
+	// ReasonRBACConfigurationFailure when there was a failure configuring/deploying RBAC entities on hosted clusters.
+	ReasonRBACConfigurationFailure string = "ReasonRBACConfigurationFailure"
 	// ReasonWebHookServiceAccountFailure when there was a failure related to the webhook's service account.
 	ReasonWebHookServiceAccountFailure string = "ReasonWebHookServiceAccountFailure"
 	// ReasonWebHookAPIServiceFailure when there was a failure related to the webhook's API service.
 	ReasonWebHookAPIServiceFailure string = "ReasonWebHookAPIServiceFailure"
+	//ReasonWebHookEndpointFailure when there was a failure related to configuring the endpoint that routes to the admission service.
+	ReasonWebHookEndpointFailure string = "ReasonWebHookEndpointFailure"
+	// ReasonServiceServiceAccount when there was a failure configuring/deploying the assisted-service service-account.
+	ReasonServiceServiceAccount string = "ServiceServiceAccount"
+	// ReasonNamespaceCreationFailure when there was a failure creating the namespace.
+	ReasonNamespaceCreationFailure string = "NamespaceCreationFailure"
+	// ReasonSpokeClusterCRDsSyncFailure when there was a failure syncing spoke cluster CRDs.
+	ReasonSpokeClusterCRDsSyncFailure string = "SpokeClusterCRDsSyncFailure"
+	// ReasonKubeconfigSecretFetchFailure when there was a failure fetching kubeconfig secret.
+	ReasonKubeconfigSecretFetchFailure string = "ReasonKubeconfigSecretFetchFailure"
+	// ReasonSpokeClientCreationFailure when there was a failure creating spoke client.
+	ReasonSpokeClientCreationFailure string = "ReasonSpokeClientCreationFailure"
+	// ReasonKonnectivityAgentFailure when there was a failure creating the namespace.
+	ReasonKonnectivityAgentFailure string = "KonnectivityAgentFailure"
+	// ReasonOSImageCACertRefFailure when there has been a failure resolving the OS image CA using OSImageCACertRef.
+	ReasonOSImageCACertRefFailure string = "OSImageCACertRefFailure"
+	// ReasonMonitoringFailure indicates there was a failure monitoring operand status
+	ReasonMonitoringFailure string = "MonitoringFailure"
+	// ReasonKubernetesIngressMissing indicates the user has not provided the required configuration for kubernetes ingress
+	ReasonKubernetesIngressMissing string = "KubernetesIngressConfigMissing"
+	// ReasonCertificateFailure indicates that the required certificates could not be created
+	ReasonCertificateFailure string = "CertificateConfigurationFailure"
 
 	// IPXEHTTPRouteEnabled is expected value in IPXEHTTPRoute to enable the route
 	IPXEHTTPRouteEnabled string = "enabled"
 	// IPXEHTTPRouteEnabled is expected value in IPXEHTTPRoute to disable the route
 	IPXEHTTPRouteDisabled string = "disabled"
+	// ReasonOSImageAdditionalParamsRefFailure when there has been a failure resolving the OS image additional params secret using OSImageAdditionalParamsRef.
+	ReasonOSImageAdditionalParamsRefFailure string = "ReasonOSImageAdditionalParamsRefFailure"
+	// ReasonImmutableAnnotationFailure when there has been a failure validating immutable annotations.
+	ReasonImmutableAnnotationFailure string = "ImmutableAnnotationFailure"
 )
 
 // AgentServiceConfigStatus defines the observed state of AgentServiceConfig
 type AgentServiceConfigStatus struct {
 	Conditions []conditionsv1.Condition `json:"conditions,omitempty"`
+	ImmutableAnnotations map[string]string `json:"immutableAnnotations,omitempty"`
 }
 
 // +kubebuilder:object:root=true

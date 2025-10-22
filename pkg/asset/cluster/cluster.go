@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/hashicorp/terraform-exec/tfexec"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 
@@ -15,12 +14,20 @@ import (
 	"github.com/openshift/installer/pkg/asset/cluster/aws"
 	"github.com/openshift/installer/pkg/asset/cluster/azure"
 	"github.com/openshift/installer/pkg/asset/cluster/openstack"
+	"github.com/openshift/installer/pkg/asset/cluster/tfvars"
+	"github.com/openshift/installer/pkg/asset/ignition/bootstrap"
+	"github.com/openshift/installer/pkg/asset/ignition/machine"
 	"github.com/openshift/installer/pkg/asset/installconfig"
+	"github.com/openshift/installer/pkg/asset/kubeconfig"
+	"github.com/openshift/installer/pkg/asset/machines"
+	"github.com/openshift/installer/pkg/asset/manifests"
+	capimanifests "github.com/openshift/installer/pkg/asset/manifests/clusterapi"
 	"github.com/openshift/installer/pkg/asset/password"
 	"github.com/openshift/installer/pkg/asset/quota"
-	"github.com/openshift/installer/pkg/metrics/timer"
-	"github.com/openshift/installer/pkg/terraform"
-	platformstages "github.com/openshift/installer/pkg/terraform/stages/platform"
+	"github.com/openshift/installer/pkg/asset/rhcos"
+	"github.com/openshift/installer/pkg/asset/tls"
+	"github.com/openshift/installer/pkg/clusterapi"
+	infra "github.com/openshift/installer/pkg/infrastructure/platform"
 	typesaws "github.com/openshift/installer/pkg/types/aws"
 	typesazure "github.com/openshift/installer/pkg/types/azure"
 	typesopenstack "github.com/openshift/installer/pkg/types/openstack"
@@ -50,29 +57,43 @@ func (c *Cluster) Dependencies() []asset.Asset {
 	return []asset.Asset{
 		&installconfig.ClusterID{},
 		&installconfig.InstallConfig{},
-		// PlatformCredsCheck, PlatformPermsCheck and PlatformProvisionCheck
+		// PlatformCredsCheck, PlatformPermsCheck, PlatformProvisionCheck, and VCenterContexts.
 		// perform validations & check perms required to provision infrastructure.
 		// We do not actually use them in this asset directly, hence
 		// they are put in the dependencies but not fetched in Generate.
 		&installconfig.PlatformCredsCheck{},
 		&installconfig.PlatformPermsCheck{},
 		&installconfig.PlatformProvisionCheck{},
+		new(rhcos.Image),
 		&quota.PlatformQuotaCheck{},
-		&TerraformVariables{},
+		&tfvars.TerraformVariables{},
 		&password.KubeadminPassword{},
+		&manifests.Manifests{},
+		&capimanifests.Cluster{},
+		&kubeconfig.AdminClient{},
+		&bootstrap.Bootstrap{},
+		&machine.Master{},
+		&machine.Arbiter{},
+		&machine.Worker{},
+		&machines.Worker{},
+		&machines.ClusterAPI{},
+		new(rhcos.Image),
+		&manifests.Manifests{},
+		&tls.RootCA{},
 	}
 }
 
 // Generate launches the cluster and generates the terraform state file on disk.
-func (c *Cluster) Generate(parents asset.Parents) (err error) {
+func (c *Cluster) Generate(ctx context.Context, parents asset.Parents) (err error) {
 	if InstallDir == "" {
 		logrus.Fatalf("InstallDir has not been set for the %q asset", c.Name())
 	}
 
 	clusterID := &installconfig.ClusterID{}
 	installConfig := &installconfig.InstallConfig{}
-	terraformVariables := &TerraformVariables{}
-	parents.Get(clusterID, installConfig, terraformVariables)
+	rhcosImage := new(rhcos.Image)
+	terraformVariables := &tfvars.TerraformVariables{}
+	parents.Get(clusterID, installConfig, terraformVariables, rhcosImage)
 
 	if fs := installConfig.Config.FeatureSet; strings.HasSuffix(string(fs), "NoUpgrade") {
 		logrus.Warnf("FeatureSet %q is enabled. This FeatureSet does not allow upgrades and may affect the supportability of the cluster.", fs)
@@ -92,49 +113,41 @@ func (c *Cluster) Generate(parents asset.Parents) (err error) {
 		platform = typesazure.StackTerraformName
 	}
 
-	stages := platformstages.StagesForPlatform(platform)
-
-	terraformDir := filepath.Join(InstallDir, "terraform")
-	if err := os.Mkdir(terraformDir, 0777); err != nil {
-		return errors.Wrap(err, "could not create the terraform directory")
-	}
-
-	terraformDirPath, err := filepath.Abs(terraformDir)
-	if err != nil {
-		return errors.Wrap(err, "cannot get absolute path of terraform directory")
-	}
-
-	defer os.RemoveAll(terraformDir)
-	terraform.UnpackTerraform(terraformDirPath, stages)
-
+	// TODO(padillon): determine whether CAPI handles tagging shared subnets, in which case we should be able
+	// to encapsulate these into the terraform package.
 	logrus.Infof("Creating infrastructure resources...")
 	switch platform {
 	case typesaws.Name:
-		if err := aws.PreTerraform(context.TODO(), clusterID.InfraID, installConfig); err != nil {
+		if err := aws.PreTerraform(ctx, clusterID.InfraID, installConfig); err != nil {
 			return err
 		}
 	case typesazure.Name, typesazure.StackTerraformName:
-		if err := azure.PreTerraform(context.TODO(), clusterID.InfraID, installConfig); err != nil {
+		if err := azure.PreTerraform(ctx, clusterID.InfraID, installConfig); err != nil {
 			return err
 		}
 	case typesopenstack.Name:
-		if err := openstack.PreTerraform(); err != nil {
+		var tfvarsFile *asset.File
+		for _, f := range terraformVariables.Files() {
+			if f.Filename == tfvars.TfPlatformVarsFileName {
+				tfvarsFile = f
+				break
+			}
+		}
+		if err := openstack.PreTerraform(ctx, tfvarsFile, installConfig, clusterID, rhcosImage); err != nil {
 			return err
 		}
 	}
 
-	tfvarsFiles := make([]*asset.File, 0, len(terraformVariables.Files())+len(stages))
-	for _, file := range terraformVariables.Files() {
-		tfvarsFiles = append(tfvarsFiles, file)
+	provider, err := infra.ProviderForPlatform(platform, installConfig.Config.EnabledFeatureGates())
+	if err != nil {
+		return fmt.Errorf("error getting infrastructure provider: %w", err)
 	}
-
-	for _, stage := range stages {
-		outputs, err := c.applyStage(platform, stage, terraformDirPath, tfvarsFiles)
-		if err != nil {
-			return errors.Wrapf(err, "failure applying terraform for %q stage", stage.Name())
-		}
-		tfvarsFiles = append(tfvarsFiles, outputs)
-		c.FileList = append(c.FileList, outputs)
+	files, err := provider.Provision(ctx, InstallDir, parents)
+	if files != nil {
+		c.FileList = append(c.FileList, files...) // append state files even in case of failure
+	}
+	if err != nil {
+		return fmt.Errorf("%s: %w", asset.ClusterCreationError, err)
 	}
 
 	return nil
@@ -153,60 +166,20 @@ func (c *Cluster) Load(f asset.FileFetcher) (found bool, err error) {
 		return true, err
 	}
 	if len(matches) != 0 {
-		return true, errors.Errorf("terraform state files alread exist.  There may already be a running cluster")
+		return true, fmt.Errorf("terraform state files already exist.  There may already be a running cluster")
 	}
 
+	matches, err = filepath.Glob(filepath.Join(InstallDir, clusterapi.ArtifactsDir, "envtest.kubeconfig"))
+	if err != nil {
+		return true, fmt.Errorf("error checking for existence of envtest.kubeconfig: %w", err)
+	}
+
+	// Cluster-API based installs can be re-entered, but this is an experimental feature
+	// that should be opted into and only used for testing and development.
+	reentrant := strings.EqualFold(os.Getenv("OPENSHIFT_INSTALL_REENTRANT"), "true")
+
+	if !reentrant && len(matches) != 0 {
+		return true, fmt.Errorf("local infrastructure provisioning artifacts already exist. There may already be a running cluster")
+	}
 	return false, nil
-}
-
-func (c *Cluster) applyStage(platform string, stage terraform.Stage, terraformDir string, tfvarsFiles []*asset.File) (*asset.File, error) {
-	// Copy the terraform.tfvars to a temp directory which will contain the terraform plan.
-	tmpDir, err := os.MkdirTemp("", fmt.Sprintf("openshift-install-%s-", stage.Name()))
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to create temp dir for terraform execution")
-	}
-	defer os.RemoveAll(tmpDir)
-
-	var extraOpts []tfexec.ApplyOption
-	for _, file := range tfvarsFiles {
-		if err := os.WriteFile(filepath.Join(tmpDir, file.Filename), file.Data, 0o600); err != nil {
-			return nil, err
-		}
-		extraOpts = append(extraOpts, tfexec.VarFile(filepath.Join(tmpDir, file.Filename)))
-	}
-
-	return c.applyTerraform(tmpDir, platform, stage, terraformDir, extraOpts...)
-}
-
-func (c *Cluster) applyTerraform(tmpDir string, platform string, stage terraform.Stage, terraformDir string, opts ...tfexec.ApplyOption) (*asset.File, error) {
-	timer.StartTimer(stage.Name())
-	defer timer.StopTimer(stage.Name())
-
-	applyErr := terraform.Apply(tmpDir, platform, stage, terraformDir, opts...)
-
-	// Write the state file to the install directory even if the apply failed.
-	if data, err := os.ReadFile(filepath.Join(tmpDir, terraform.StateFilename)); err == nil {
-		c.FileList = append(c.FileList, &asset.File{
-			Filename: stage.StateFilename(),
-			Data:     data,
-		})
-	} else if !os.IsNotExist(err) {
-		logrus.Errorf("Failed to read tfstate: %v", err)
-		return nil, errors.Wrap(err, "failed to read tfstate")
-	}
-
-	if applyErr != nil {
-		return nil, errors.Wrap(applyErr, asset.ClusterCreationError)
-	}
-
-	outputs, err := terraform.Outputs(tmpDir, terraformDir)
-	if err != nil {
-		return nil, errors.Wrapf(err, "could not get outputs from stage %q", stage.Name())
-	}
-
-	outputsFile := &asset.File{
-		Filename: stage.OutputsFilename(),
-		Data:     outputs,
-	}
-	return outputsFile, nil
 }

@@ -8,11 +8,11 @@ import (
 )
 
 const (
-	ClusterSpecSyncedCondition string = "SpecSynced"
+	ClusterSpecSyncedCondition hivev1.ClusterInstallConditionType = "SpecSynced"
 
-	ClusterCompletedCondition string = hivev1.ClusterInstallCompleted
+	ClusterCompletedCondition = hivev1.ClusterInstallCompleted
 
-	ClusterRequirementsMetCondition  string = hivev1.ClusterInstallRequirementsMet
+	ClusterRequirementsMetCondition         = hivev1.ClusterInstallRequirementsMet
 	ClusterReadyReason               string = "ClusterIsReady"
 	ClusterReadyMsg                  string = "The cluster is ready to begin the installation"
 	ClusterNotReadyReason            string = "ClusterNotReady"
@@ -22,27 +22,25 @@ const (
 	ClusterInstallationStoppedReason string = "ClusterInstallationStopped"
 	ClusterInstallationStoppedMsg    string = "The cluster installation stopped"
 	ClusterInsufficientAgentsReason  string = "InsufficientAgents"
-	ClusterInsufficientAgentsMsg     string = "The cluster currently requires %d agents but only %d have registered"
+	ClusterInsufficientAgentsMsg     string = "The cluster currently requires exactly %d master agents, %d arbiter agents and %d worker agents, but currently registered %d master agents, %d arbiter agents and %d worker agents"
 	ClusterUnapprovedAgentsReason    string = "UnapprovedAgents"
 	ClusterUnapprovedAgentsMsg       string = "The installation is pending on the approval of %d agents"
 	ClusterUnsyncedAgentsReason      string = "UnsyncedAgents"
 	ClusterUnsyncedAgentsMsg         string = "The cluster currently has %d agents with spec error"
-	ClusterAdditionalAgentsReason    string = "AdditionalAgents"
-	ClusterAdditionalAgentsMsg       string = "The cluster currently requires exactly %d agents but have %d registered"
 
-	ClusterValidatedCondition        string = "Validated"
-	ClusterValidationsOKMsg          string = "The cluster's validations are passing"
-	ClusterValidationsUnknownMsg     string = "The cluster's validations have not yet been calculated"
-	ClusterValidationsFailingMsg     string = "The cluster's validations are failing:"
-	ClusterValidationsUserPendingMsg string = "The cluster's validations are pending for user:"
+	ClusterValidatedCondition        hivev1.ClusterInstallConditionType = "Validated"
+	ClusterValidationsOKMsg          string                             = "The cluster's validations are passing"
+	ClusterValidationsUnknownMsg     string                             = "The cluster's validations have not yet been calculated"
+	ClusterValidationsFailingMsg     string                             = "The cluster's validations are failing:"
+	ClusterValidationsUserPendingMsg string                             = "The cluster's validations are pending for user:"
 
-	ClusterFailedCondition string = hivev1.ClusterInstallFailed
+	ClusterFailedCondition        = hivev1.ClusterInstallFailed
 	ClusterFailedReason    string = "InstallationFailed"
 	ClusterFailedMsg       string = "The installation failed:"
 	ClusterNotFailedReason string = "InstallationNotFailed"
 	ClusterNotFailedMsg    string = "The installation has not failed"
 
-	ClusterStoppedCondition       string = hivev1.ClusterInstallStopped
+	ClusterStoppedCondition              = hivev1.ClusterInstallStopped
 	ClusterStoppedFailedReason    string = "InstallationFailed"
 	ClusterStoppedFailedMsg       string = "The installation has stopped due to error"
 	ClusterStoppedCanceledReason  string = "InstallationCancelled"
@@ -79,6 +77,13 @@ const (
 	ClusterBackendErrorMsg    string = "The Spec could not be synced due to backend error:"
 	ClusterInputErrorReason   string = "InputError"
 	ClusterInputErrorMsg      string = "The Spec could not be synced due to an input error:"
+
+	ClusterLastInstallationPreparationFailedOKReason    string                             = "There is no failing prior preparation attempt"
+	ClusterLastInstallationPreparationFailedErrorReason string                             = "The last installation preparation failed"
+	ClusterLastInstallationPreparationPending           string                             = "Cluster preparation has never been performed for this cluster"
+	ClusterLastInstallationPreparationFailedCondition   hivev1.ClusterInstallConditionType = "LastInstallationPreparationFailed"
+
+	ClusterConsumerLabel string = "agentclusterinstalls.agent-install.openshift.io/consumer"
 )
 
 // +genclient
@@ -146,13 +151,34 @@ type AgentClusterInstallSpec struct {
 	// +optional
 	Compute []AgentMachinePool `json:"compute,omitempty"`
 
+	// Arbiter is the configuration for the machines that have the
+	// arbiter role.
+	// +optional
+	Arbiter *AgentMachinePool `json:"arbiter,omitempty"`
+
 	// APIVIP is the virtual IP used to reach the OpenShift cluster's API.
 	// +optional
 	APIVIP string `json:"apiVIP,omitempty"`
 
+	// APIVIPs are the virtual IPs used to reach the OpenShift cluster's API.
+	// Enter one IP address for single-stack clusters, or up to two for dual-stack clusters (at
+	// most one IP address per IP stack used). The order of stacks should be the same as order
+	// of subnets in Cluster Networks, Service Networks, and Machine Networks.
+	// +kubebuilder:validation:MaxItems=2
+	// +optional
+	APIVIPs []string `json:"apiVIPs,omitempty"`
+
 	// IngressVIP is the virtual IP used for cluster ingress traffic.
 	// +optional
 	IngressVIP string `json:"ingressVIP,omitempty"`
+
+	// IngressVIPs are the virtual IPs used for cluster ingress traffic.
+	// Enter one IP address for single-stack clusters, or up to two for dual-stack clusters (at
+	// most one IP address per IP stack used). The order of stacks should be the same as order
+	// of subnets in Cluster Networks, Service Networks, and Machine Networks.
+	// +kubebuilder:validation:MaxItems=2
+	// +optional
+	IngressVIPs []string `json:"ingressVIPs,omitempty"`
 
 	// HoldInstallation will prevent installation from happening when true.
 	// Inspection and validation will proceed as usual, but once the RequirementsMet condition is true,
@@ -175,6 +201,25 @@ type AgentClusterInstallSpec struct {
 	// PlatformType is the name for the specific platform upon which to perform the installation.
 	// +optional
 	PlatformType PlatformType `json:"platformType,omitempty"`
+
+	// ExternalPlatformSpec represents generic infrastructure provider.
+	// Platform-specific components should be supplemented separately.
+	// +optional
+	ExternalPlatformSpec *ExternalPlatformSpec `json:"external,omitempty"`
+
+	// Set to true to allow control plane nodes to be schedulable
+	// +optional
+	MastersSchedulable bool `json:"mastersSchedulable,omitempty"`
+
+	// MirrorRegistryRef is a reference to ClusterMirrorRegistry ConfigMap that holds the registries toml
+	// data
+	// Set per cluster mirror registry
+	// +optional
+	MirrorRegistryRef *MirrorRegistryConfigMapReference `json:"mirrorRegistryRef,omitempty"`
+
+	// LoadBalancer defines the load balancer used by the cluster for ingress traffic.
+	// +optional
+	LoadBalancer *LoadBalancer `json:"loadBalancer,omitempty"`
 }
 
 // IgnitionEndpoint stores the data to of the custom ignition endpoint.
@@ -228,9 +273,19 @@ type AgentClusterInstallStatus struct {
 	// +optional
 	APIVIP string `json:"apiVIP,omitempty"`
 
+	// APIVIPs are the virtual IPs used to reach the OpenShift cluster's API.
+	// +kubebuilder:validation:MaxItems=2
+	// +optional
+	APIVIPs []string `json:"apiVIPs,omitempty"`
+
 	// IngressVIP is the virtual IP used for cluster ingress traffic.
 	// +optional
 	IngressVIP string `json:"ingressVIP,omitempty"`
+
+	// IngressVIPs are the virtual IPs used for cluster ingress traffic.
+	// +kubebuilder:validation:MaxItems=2
+	// +optional
+	IngressVIPs []string `json:"ingressVIPs,omitempty"`
 
 	// UserManagedNetworking indicates if the networking is managed by the user.
 	// +optional
@@ -287,7 +342,7 @@ type Networking struct {
 	NetworkType string `json:"networkType,omitempty"`
 
 	// UserManagedNetworking indicates if the networking is managed by the user.
-	// For single-node installations, set to true or leave empty.
+	// For single-node installations (none or external platform), set to true or leave empty.
 	// +optional
 	UserManagedNetworking *bool `json:"userManagedNetworking,omitempty"`
 }
@@ -315,7 +370,7 @@ type ClusterNetworkEntry struct {
 type ProvisionRequirements struct {
 
 	// ControlPlaneAgents is the number of matching approved and ready Agents with the control plane role
-	// required to launch the install. Must be either 1 or 3.
+	// required to launch the install. Must be either 1 or 3-5.
 	ControlPlaneAgents int `json:"controlPlaneAgents"`
 
 	// WorkerAgents is the minimum number of matching approved and ready Agents with the worker role
@@ -323,6 +378,12 @@ type ProvisionRequirements struct {
 	// +kubebuilder:validation:Minimum=0
 	// +optional
 	WorkerAgents int `json:"workerAgents,omitempty"`
+
+	// ArbiterAgents is the minimum number of matching approved and ready Agents with the arbiter role
+	// required to launch the install.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	ArbiterAgents int `json:"arbiterAgents,omitempty"`
 }
 
 // HyperthreadingMode is the mode of hyperthreading for a machine.
@@ -337,13 +398,44 @@ const (
 )
 
 const (
-	MasterAgentMachinePool string = "master"
-	WorkerAgentMachinePool string = "worker"
+	MasterAgentMachinePool  string = "master"
+	ArbiterAgentMachinePool string = "arbiter"
+	WorkerAgentMachinePool  string = "worker"
 )
 
 // PlatformType is a specific supported infrastructure provider.
-// +kubebuilder:validation:Enum="";BareMetal;None;VSphere
+// +kubebuilder:validation:Enum="";BareMetal;None;VSphere;Nutanix;External
 type PlatformType string
+
+// CloudControllerManager describes the type of cloud controller manager to be enabled.
+// +kubebuilder:validation:Enum="";BareMetal;None;VSphere;Nutanix;External
+type CloudControllerManager string
+
+const (
+	// CloudControllerManagerTypeExternal specifies that an external cloud provider is to be configured.
+	CloudControllerManagerTypeExternal = "External"
+
+	// CloudControllerManagerTypeNone specifies that no cloud provider is to be configured.
+	CloudControllerManagerTypeNone = ""
+)
+
+// ExternalPlatformSpec holds the desired state for the generic External infrastructure provider.
+type ExternalPlatformSpec struct {
+	// PlatformName holds the arbitrary string representing the infrastructure provider name, expected to be set at the installation time.
+	// This field is solely for informational and reporting purposes and is not expected to be used for decision-making.
+	// +kubebuilder:default:="Unknown"
+	// +default="Unknown"
+	// +kubebuilder:validation:XValidation:rule="oldSelf == 'Unknown' || self == oldSelf",message="platform name cannot be changed once set"
+	// +optional
+	PlatformName string `json:"platformName,omitempty"`
+
+	// CloudControllerManager when set to external, this property will enable an external cloud provider.
+	// +kubebuilder:default:=""
+	// +default=""
+	// +kubebuilder:validation:Enum="";External
+	// +optional
+	CloudControllerManager CloudControllerManager `json:"cloudControllerManager,omitempty"`
+}
 
 const (
 	// BareMetalPlatformType represents managed bare metal infrastructure.
@@ -354,6 +446,12 @@ const (
 
 	// VSpherePlatformType represents VMWare vSphere infrastructure.
 	VSpherePlatformType PlatformType = "VSphere"
+
+	// NutanixPlatformType represents Nutanix infrastructure.
+	NutanixPlatformType PlatformType = "Nutanix"
+
+	// ExternalPlatformType represents external cloud provider infrastructure.
+	ExternalPlatformType PlatformType = "External"
 )
 
 // AgentMachinePool is a pool of machines to be installed.
@@ -376,7 +474,7 @@ type DiskEncryption struct {
 	// Enable/disable disk encryption on master nodes, worker nodes, or all nodes.
 	//
 	// +kubebuilder:default=none
-	// +kubebuilder:validation:Enum=none;all;masters;workers
+	// +kubebuilder:validation:Enum=none;all;masters;arbiters;workers;"masters,arbiters";"masters,workers";"arbiters,workers";"masters,arbiters,workers"
 	EnableOn *string `json:"enableOn,omitempty"`
 
 	// The disk encryption mode to use.
@@ -426,6 +524,41 @@ type ManifestsConfigMapReference struct {
 	Name string `json:"name"`
 }
 
+// LoadBalancer defines the load balancer used by the cluster.
+// +union
+type LoadBalancer struct {
+	// Type defines the type of load balancer used by the cluster, which can be managed by the user or by the
+	// cluster. The default value is ClusterManaged.
+	// +default="ClusterManaged"
+	// +kubebuilder:default:="ClusterManaged"
+	// +kubebuilder:validation:Enum:="ClusterManaged";"UserManaged"
+	// +optional
+	// +unionDiscriminator
+	Type LoadBalancerType `json:"type,omitempty"`
+}
+
+// LoadBalancerType defines the type of load balancer used by the cluster.
+type LoadBalancerType string
+
+const (
+	// LoadBalancerTypeClusterManaged is a load balancer with virtual IP addresses managed internally by the
+	// cluster.
+	LoadBalancerTypeClusterManaged LoadBalancerType = "ClusterManaged"
+
+	// LoadBalancerTypeUserManaged is a load balancer managed outside of the cluster by the customer. When this is
+	// used no virtual IP addresses should be specified. Note that this is only allowed for the bare metal and
+	// vSphere platforms.
+	LoadBalancerTypeUserManaged LoadBalancerType = "UserManaged"
+)
+
 func init() {
 	SchemeBuilder.Register(&AgentClusterInstall{}, &AgentClusterInstallList{})
+}
+
+// MirrorRegistryConfigMapReference contains reference to a ConfigMap for mirror registry
+type MirrorRegistryConfigMapReference struct {
+	// Name is the name of the ConfigMap that this refers to
+	Name string `json:"name"`
+	// Namespace of the ConfigMap
+	Namespace string `json:"namespace"`
 }

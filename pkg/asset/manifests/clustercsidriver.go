@@ -1,6 +1,7 @@
 package manifests
 
 import (
+	"context"
 	"path/filepath"
 
 	"github.com/pkg/errors"
@@ -10,9 +11,11 @@ import (
 	"github.com/openshift/installer/pkg/asset/manifests/aws"
 	"github.com/openshift/installer/pkg/asset/manifests/azure"
 	"github.com/openshift/installer/pkg/asset/manifests/gcp"
+	"github.com/openshift/installer/pkg/asset/manifests/ibmcloud"
 	awstypes "github.com/openshift/installer/pkg/types/aws"
 	azuretypes "github.com/openshift/installer/pkg/types/azure"
 	gcptypes "github.com/openshift/installer/pkg/types/gcp"
+	ibmcloudtypes "github.com/openshift/installer/pkg/types/ibmcloud"
 )
 
 var (
@@ -42,7 +45,7 @@ func (*ClusterCSIDriverConfig) Dependencies() []asset.Asset {
 }
 
 // Generate the ClusterCSIDriverConfig.
-func (csi *ClusterCSIDriverConfig) Generate(dependencies asset.Parents) error {
+func (csi *ClusterCSIDriverConfig) Generate(_ context.Context, dependencies asset.Parents) error {
 	installConfig := &installconfig.InstallConfig{}
 	clusterID := &installconfig.ClusterID{}
 	dependencies.Get(installConfig, clusterID)
@@ -95,11 +98,29 @@ func (csi *ClusterCSIDriverConfig) Generate(dependencies asset.Parents) error {
 			return nil
 		}
 		kmsKey := platform.OSDisk.EncryptionKey.KMSKey
+
 		configData, err := gcp.ClusterCSIDriverConfig{
 			Name:      kmsKey.Name,
 			KeyRing:   kmsKey.KeyRing,
 			ProjectID: kmsKey.ProjectID,
 			Location:  kmsKey.Location,
+		}.YAML()
+		if err != nil {
+			return errors.Wrap(err, "could not create CSI cluster driver config")
+		}
+		csi.File = &asset.File{
+			Filename: clusterCSIDriverConfigFileName,
+			Data:     configData,
+		}
+	case ibmcloudtypes.Name:
+		platform := installConfig.Config.Platform.IBMCloud.DefaultMachinePlatform
+		if platform == nil || platform.BootVolume == nil || platform.BootVolume.EncryptionKey == "" {
+			return nil
+		}
+
+		encryptionKey := platform.BootVolume.EncryptionKey
+		configData, err := ibmcloud.ClusterCSIDriverConfig{
+			EncryptionKeyCRN: encryptionKey,
 		}.YAML()
 		if err != nil {
 			return errors.Wrap(err, "could not create CSI cluster driver config")

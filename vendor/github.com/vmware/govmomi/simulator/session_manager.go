@@ -1,18 +1,6 @@
-/*
-Copyright (c) 2017-2018 VMware, Inc. All Rights Reserved.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
+// © Broadcom. All Rights Reserved.
+// The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
+// SPDX-License-Identifier: Apache-2.0
 
 package simulator
 
@@ -20,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"reflect"
 	"strings"
@@ -29,6 +18,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/vmware/govmomi/session"
+	"github.com/vmware/govmomi/vim25"
 	"github.com/vmware/govmomi/vim25/methods"
 	"github.com/vmware/govmomi/vim25/mo"
 	"github.com/vmware/govmomi/vim25/soap"
@@ -41,6 +31,7 @@ type SessionManager struct {
 
 	ServiceHostName string
 	TLSCert         func() string
+	ValidLogin      func(*types.Login) bool
 
 	sessions map[string]Session
 }
@@ -80,6 +71,7 @@ func createSession(ctx *Context, name string, locale string) types.UserSession {
 			ExtensionSession: types.NewBool(false),
 		},
 		Registry: NewRegistry(),
+		Map:      ctx.Map,
 	}
 
 	ctx.SetSession(session, true)
@@ -94,6 +86,17 @@ func (m *SessionManager) getSession(id string) (Session, bool) {
 	return s, ok
 }
 
+func (m *SessionManager) findSession(user string) (Session, bool) {
+	sessionMutex.Lock()
+	defer sessionMutex.Unlock()
+	for _, session := range m.sessions {
+		if session.UserName == user {
+			return session, true
+		}
+	}
+	return Session{}, false
+}
+
 func (m *SessionManager) delSession(id string) {
 	sessionMutex.Lock()
 	defer sessionMutex.Unlock()
@@ -106,22 +109,23 @@ func (m *SessionManager) putSession(s Session) {
 	m.sessions[s.Key] = s
 }
 
-func (s *SessionManager) validLogin(ctx *Context, req *types.Login) bool {
-	if ctx.Session != nil {
-		return false
-	}
-	user := ctx.svc.Listen.User
-	if user == nil || user == DefaultLogin {
+func (s *SessionManager) Authenticate(u url.URL, req *types.Login) bool {
+	if u.User == nil || u.User == DefaultLogin {
 		return req.UserName != "" && req.Password != ""
 	}
-	pass, _ := user.Password()
-	return req.UserName == user.Username() && req.Password == pass
+
+	if s.ValidLogin != nil {
+		return s.ValidLogin(req)
+	}
+
+	pass, _ := u.User.Password()
+	return req.UserName == u.User.Username() && req.Password == pass
 }
 
 func (s *SessionManager) Login(ctx *Context, req *types.Login) soap.HasFault {
 	body := new(methods.LoginBody)
 
-	if s.validLogin(ctx, req) {
+	if ctx.Session == nil && s.Authenticate(*ctx.svc.Listen, req) {
 		body.Res = &types.LoginResponse{
 			Returnval: createSession(ctx, req.UserName, req.Locale),
 		}
@@ -181,7 +185,7 @@ func (s *SessionManager) LoginByToken(ctx *Context, req *types.LoginByToken) soa
 func (s *SessionManager) Logout(ctx *Context, _ *types.Logout) soap.HasFault {
 	session := ctx.Session
 	s.delSession(session.Key)
-	pc := Map.content().PropertyCollector
+	pc := ctx.Map.content().PropertyCollector
 
 	for ref, obj := range ctx.Session.Registry.objects {
 		if ref == pc {
@@ -270,6 +274,25 @@ func (s *SessionManager) CloneSession(ctx *Context, ticket *types.CloneSession) 
 	return body
 }
 
+func (s *SessionManager) ImpersonateUser(ctx *Context, req *types.ImpersonateUser) soap.HasFault {
+	body := new(methods.ImpersonateUserBody)
+
+	session, exists := s.findSession(req.UserName)
+
+	if exists {
+		session.Key = uuid.New().String()
+		ctx.SetSession(session, true)
+
+		body.Res = &types.ImpersonateUserResponse{
+			Returnval: session.UserSession,
+		}
+	} else {
+		body.Fault_ = invalidLogin
+	}
+
+	return body
+}
+
 func (s *SessionManager) AcquireGenericServiceTicket(ticket *types.AcquireGenericServiceTicket) soap.HasFault {
 	return &methods.AcquireGenericServiceTicketBody{
 		Res: &types.AcquireGenericServiceTicketResponse{
@@ -296,12 +319,33 @@ type Context struct {
 	Map     *Registry
 }
 
+func SOAPCookie(ctx *Context) string {
+	if cookie := ctx.Header.Cookie; cookie != nil {
+		return cookie.Value
+	}
+	return ""
+}
+
+func HTTPCookie(ctx *Context) string {
+	if cookie, err := ctx.req.Cookie(soap.SessionCookieName); err == nil {
+		return cookie.Value
+	}
+	return ""
+}
+
+func (c *Context) sessionManager() *SessionManager {
+	return c.svc.sdk[vim25.Path].SessionManager()
+}
+
 // mapSession maps an HTTP cookie to a Session.
 func (c *Context) mapSession() {
-	if cookie, err := c.req.Cookie(soap.SessionCookieName); err == nil {
-		if val, ok := c.svc.sm.getSession(cookie.Value); ok {
-			c.SetSession(val, false)
-		}
+	cookie := c.Map.Cookie
+	if cookie == nil {
+		cookie = HTTPCookie
+	}
+
+	if val, ok := c.sessionManager().getSession(cookie(c)); ok {
+		c.SetSession(val, false)
 	}
 }
 
@@ -348,7 +392,8 @@ func (c *Context) SetSession(session Session, login bool) {
 	session.LastActiveTime = time.Now()
 	session.CallCount++
 
-	c.svc.sm.putSession(session)
+	m := c.sessionManager()
+	m.putSession(session)
 	c.Session = &session
 
 	if login {
@@ -366,11 +411,20 @@ func (c *Context) SetSession(session Session, login bool) {
 			Locale:    session.Locale,
 		})
 
-		SessionIdleWatch(c.Context, session.Key, c.svc.sm.expiredSession)
+		SessionIdleWatch(c.Context, session.Key, m.expiredSession)
 	}
 }
 
-// WithLock holds a lock for the given object while then given function is run.
+// For returns a Context with Registry Map for the given path.
+// This is intended for calling into other namespaces internally,
+// such as vslm simulator methods calling vim25 methods for example.
+func (c *Context) For(path string) *Context {
+	clone := *c
+	clone.Map = c.svc.sdk[path]
+	return &clone
+}
+
+// WithLock holds a lock for the given object while the given function is run.
 // It will skip locking if this context already holds the given object's lock.
 func (c *Context) WithLock(obj mo.Reference, f func()) {
 	// TODO: This is not always going to be correct. An object should
@@ -379,12 +433,16 @@ func (c *Context) WithLock(obj mo.Reference, f func()) {
 	// argument to accomplish this.
 	// Basic mutex locking will work even if obj doesn't belong to Map, but
 	// if obj implements sync.Locker, that custom locking will not be used.
-	Map.WithLock(c, obj, f)
+	c.Map.WithLock(c, obj, f)
+}
+
+func (c *Context) Update(obj mo.Reference, changes []types.PropertyChange) {
+	c.Map.Update(c, obj, changes)
 }
 
 // postEvent wraps EventManager.PostEvent for internal use, with a lock on the EventManager.
 func (c *Context) postEvent(events ...types.BaseEvent) {
-	m := Map.EventManager()
+	m := c.Map.EventManager()
 	c.WithLock(m, func() {
 		for _, event := range events {
 			m.PostEvent(c, &types.PostEvent{EventToPost: event})
@@ -396,6 +454,7 @@ func (c *Context) postEvent(events ...types.BaseEvent) {
 type Session struct {
 	types.UserSession
 	*Registry
+	Map *Registry
 }
 
 func (s *Session) setReference(item mo.Reference) {
@@ -426,7 +485,7 @@ func (s *Session) Get(ref types.ManagedObjectReference) mo.Reference {
 	switch ref.Type {
 	case "SessionManager":
 		// Clone SessionManager so the PropertyCollector can properly report CurrentSession
-		m := *Map.SessionManager()
+		m := *s.Map.SessionManager()
 		m.CurrentSession = &s.UserSession
 
 		// TODO: we could maintain SessionList as part of the SessionManager singleton
@@ -438,10 +497,10 @@ func (s *Session) Get(ref types.ManagedObjectReference) mo.Reference {
 
 		return &m
 	case "PropertyCollector":
-		if ref == Map.content().PropertyCollector {
+		if ref == s.Map.content().PropertyCollector {
 			// Per-session instance of the PropertyCollector singleton.
 			// Using reflection here as PropertyCollector might be wrapped with a custom type.
-			obj = Map.Get(ref)
+			obj = s.Map.Get(ref)
 			pc := reflect.New(reflect.TypeOf(obj).Elem())
 			obj = pc.Interface().(mo.Reference)
 			s.Registry.setReference(obj, ref)
@@ -449,5 +508,5 @@ func (s *Session) Get(ref types.ManagedObjectReference) mo.Reference {
 		}
 	}
 
-	return Map.Get(ref)
+	return s.Map.Get(ref)
 }

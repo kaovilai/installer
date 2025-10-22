@@ -13,20 +13,12 @@ func withServerGroupPolicy(serverGroupPolicy string) func(*openstack.MachinePool
 	return func(mp *openstack.MachinePool) { mp.ServerGroupPolicy = openstack.ServerGroupPolicy(serverGroupPolicy) }
 }
 
-func withZones() func(*openstack.MachinePool) {
-	return func(mp *openstack.MachinePool) { mp.Zones = []string{"one", "two", "three"} }
+func withRootVolume(rootVolume *openstack.RootVolume) func(*openstack.MachinePool) {
+	return func(mp *openstack.MachinePool) { mp.RootVolume = rootVolume }
 }
 
-func withVolumeZones() func(*openstack.MachinePool) {
-	return func(mp *openstack.MachinePool) {
-		mp.RootVolume = &openstack.RootVolume{Zones: []string{"one", "two", "three"}}
-	}
-}
-
-func withFailureDomain(fd openstack.FailureDomain) func(*openstack.MachinePool) {
-	return func(mp *openstack.MachinePool) {
-		mp.FailureDomains = append(mp.FailureDomains, fd)
-	}
+func withAvailabilityZone(zones []string) func(*openstack.MachinePool) {
+	return func(mp *openstack.MachinePool) { mp.Zones = zones }
 }
 
 func testMachinePool(options ...func(*openstack.MachinePool)) *openstack.MachinePool {
@@ -88,60 +80,68 @@ func TestValidateMachinePool(t *testing.T) {
 			),
 		},
 		{
-			"failure domains",
-			testMachinePool(withFailureDomain(openstack.FailureDomain{
-				PortTargets: []openstack.NamedPortTarget{{ID: "one"}, {ID: "two"}},
-			})),
-			"master",
+			"with no rootVolume type nor types",
+			testMachinePool(
+				withRootVolume(&openstack.RootVolume{
+					Size: 10,
+				}),
+			),
+			"default",
+			check(
+				someErrorType(field.ErrorTypeInvalid),
+				exactlyNErrors(2),
+			),
+		},
+		{
+			"with both rootVolume type and types",
+			testMachinePool(
+				withRootVolume(&openstack.RootVolume{
+					Size:           10,
+					DeprecatedType: "fast",
+					Types:          []string{"fast"},
+				}),
+			),
+			"default",
+			check(
+				someErrorType(field.ErrorTypeInvalid),
+				exactlyNErrors(2),
+			),
+		},
+		{
+			"with three compute zones and one root volume type",
+			testMachinePool(
+				withRootVolume(&openstack.RootVolume{
+					Size:  10,
+					Types: []string{"fast"},
+					Zones: []string{"az1", "az2", "az3"},
+				}),
+				withAvailabilityZone([]string{"az1", "az2", "az3"}),
+			),
+			"default",
 			check(noError),
 		},
 		{
-			"failure domains on worker",
-			testMachinePool(withFailureDomain(openstack.FailureDomain{
-				PortTargets: []openstack.NamedPortTarget{{ID: "one"}, {ID: "two"}},
-			})),
-			"worker",
-			check(
-				someErrorType(field.ErrorTypeForbidden),
-				exactlyNErrors(1),
-			),
-		},
-		{
-			"failure domains, duplicate portTarget ID",
-			testMachinePool(withFailureDomain(openstack.FailureDomain{
-				PortTargets: []openstack.NamedPortTarget{{ID: "one"}, {ID: "one"}},
-			})),
-			"master",
-			check(
-				someErrorType(field.ErrorTypeDuplicate),
-				exactlyNErrors(1),
-			),
-		},
-		{
-			"failure domains together with zones",
+			"with three compute zones and two root volume types",
 			testMachinePool(
-				withZones(),
-				withFailureDomain(openstack.FailureDomain{
-					PortTargets: []openstack.NamedPortTarget{{ID: "one"}, {ID: "two"}},
+				withRootVolume(&openstack.RootVolume{
+					Size:  10,
+					Types: []string{"fast", "slow"},
+					Zones: []string{"az1", "az2", "az3"},
 				}),
+				withAvailabilityZone([]string{"az1", "az2", "az3"}),
 			),
-			"master",
+			"default",
 			check(
-				someErrorType(field.ErrorTypeForbidden),
+				someErrorType(field.ErrorTypeInvalid),
 				exactlyNErrors(1),
 			),
 		},
 		{
-			"failure domains together with root volume zones",
-			testMachinePool(
-				withVolumeZones(),
-				withFailureDomain(openstack.FailureDomain{
-					PortTargets: []openstack.NamedPortTarget{{ID: "one"}, {ID: "two"}},
-				}),
-			),
-			"master",
+			"with three compute zones and invalid root volume missing zones",
+			testMachinePool(withAvailabilityZone([]string{"az0", "az1", "az2"}), withRootVolume(&openstack.RootVolume{Size: 100, Types: []string{"fast"}})),
+			"default",
 			check(
-				someErrorType(field.ErrorTypeForbidden),
+				someErrorType(field.ErrorTypeRequired),
 				exactlyNErrors(1),
 			),
 		},

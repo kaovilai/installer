@@ -4,6 +4,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation/field"
 
 	configv1 "github.com/openshift/api/config/v1"
+	"github.com/openshift/installer/pkg/asset/installconfig/openstack/validation"
 	"github.com/openshift/installer/pkg/types"
 	"github.com/openshift/installer/pkg/types/openstack"
 	"github.com/openshift/installer/pkg/validate"
@@ -27,6 +28,10 @@ func ValidatePlatform(p *openstack.Platform, n *types.Networking, fldPath *field
 		}
 	}
 
+	if controlPlanePort := c.OpenStack.ControlPlanePort; controlPlanePort != nil {
+		allErrs = append(allErrs, validateControlPlanePort(controlPlanePort, fldPath.Child("controlPlanePort"))...)
+	}
+
 	return allErrs
 }
 
@@ -38,4 +43,34 @@ func validateLoadBalancer(lbType configv1.PlatformLoadBalancerType) bool {
 	default:
 		return false
 	}
+}
+
+// validateControlPlanePort returns all the errors found when the control plane port is not valid.
+func validateControlPlanePort(controlPlanePort *openstack.PortTarget, fldPath *field.Path) field.ErrorList {
+	var allErrs field.ErrorList
+
+	if controlPlanePort.Network.ID != "" && !validation.ValidUUIDv4(controlPlanePort.Network.ID) {
+		allErrs = append(allErrs, field.Invalid(fldPath.Child("network"), controlPlanePort.Network.ID, "invalid network ID: must be a UUIDv4"))
+	}
+
+	fixedIPsField := fldPath.Child("fixedIPs")
+
+	switch l := len(controlPlanePort.FixedIPs); l {
+	case 0:
+		allErrs = append(allErrs, field.Required(fixedIPsField, "it is required to set a subnet filter to the controlPlanePort"))
+	case 1, 2:
+		for i, fixedIP := range controlPlanePort.FixedIPs {
+			subnetField := fixedIPsField.Index(i).Child("subnet")
+			if fixedIP.Subnet.ID != "" && !validation.ValidUUIDv4(fixedIP.Subnet.ID) {
+				allErrs = append(allErrs, field.Invalid(subnetField.Child("id"), fixedIP.Subnet.ID, "invalid subnet ID: must be a UUIDv4"))
+			}
+			if fixedIP.Subnet.ID == "" && fixedIP.Subnet.Name == "" {
+				allErrs = append(allErrs, field.Required(subnetField, "either ID or Name must be set on the subnet filter"))
+			}
+		}
+	default:
+		allErrs = append(allErrs, field.TooMany(fixedIPsField, l, 2))
+	}
+
+	return allErrs
 }

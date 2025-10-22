@@ -2,50 +2,49 @@
 
 set -euo pipefail
 
-# shellcheck disable=SC1091
-. /usr/local/bin/release-image.sh
-
-export KUBECONFIG=/opt/openshift/auth/kubeconfig-loopback
+export KUBECONFIG=/opt/openshift/auth/kubeconfig
 
 # Wait till the baremetalhosts are populated
 until oc get baremetalhosts -n openshift-machine-api; do
-   echo Waiting for BareMetalHosts to appear...
+   echo Waiting for BareMetalHosts CRD to appear...
    sleep 20
 done
 
-AUTH_DIR=/opt/metal3/auth
-ironic_url="$(printf 'http://%s:%s@localhost:6385/v1' "$(cat "${AUTH_DIR}/ironic/username")" "$(cat "${AUTH_DIR}/ironic/password")")"
-inspector_url="$(printf 'http://%s:%s@localhost:5050/v1' "$(cat "${AUTH_DIR}/ironic-inspector/username")" "$(cat "${AUTH_DIR}/ironic-inspector/password")")"
-
-# Wait for a master to appear.
-while [ "$(curl -s "${ironic_url}/nodes" | jq '.nodes[] | .uuid' | wc -l)" -lt 1 ]; do
-    echo waiting for a master node to show up
+echo "Waiting for $CONTROL_PLANE_REPLICA_COUNT masters to become provisioned"
+while [ "$(oc get bmh -n openshift-machine-api -l installer.openshift.io/role=control-plane -o json | jq '.items[].status.provisioning.state' | grep provisioned -c)" -lt "$CONTROL_PLANE_REPLICA_COUNT"  ]; do
+    echo "Waiting for $CONTROL_PLANE_REPLICA_COUNT masters to become provisioned"
+    oc get bmh -A || true
     sleep 20
 done
 
-# Wait for the nodes to become active after introspection.
-# Probably don't need this but I want to be 100% sure.
-while curl -s "${ironic_url}/nodes" | jq '.nodes[] | .provision_state' | grep -v active; do
-    echo Waiting for nodes to become active
-    sleep 20
+# Pause control-plane management via ironic for Two-Node OpenShift with Fencing (TNF), since this conflicts with how TNF achieves HA
+TNF_TOPOLOGY="DualReplica"
+
+echo "Looking up control-plane topology"
+CONTROL_PLANE_TOPOLOGY=$(oc get infrastructures.config.openshift.io cluster -o json | jq -r '.status.controlPlaneTopology')
+if [ -z "${CONTROL_PLANE_TOPOLOGY}" ]; then
+    echo "Error: couldn't lookup control-plane topology" >&2
+    exit 1
+elif [ "${CONTROL_PLANE_TOPOLOGY}" = "${TNF_TOPOLOGY}" ]; then
+    echo "Control-plane topology set to '${TNF_TOPOLOGY}'; setting the control-plane hosts to detached"
+    while ! oc annotate --overwrite bmh -n openshift-machine-api -l installer.openshift.io/role=control-plane baremetalhost.metal3.io/detached="" ; do
+        sleep 5
+        echo "Setting control-plane nodes to detached failed, retrying"
+    done
+else
+    echo "Control-plane topology set to '${CONTROL_PLANE_TOPOLOGY}'; no further actions required"
+fi
+
+# Shut down ironic containers so that the API VIP can fail over to the control
+# plane.
+echo "Stopping provisioning services..."
+systemctl --no-block stop ironic.service
+while systemctl is-active metal3-baremetal-operator.service; do
+    sleep 10
 done
 
-echo Nodes are all active
-
-BAREMETAL_OPERATOR_IMAGE=$(image_for baremetal-operator)
-
-for node in $(curl -s "${ironic_url}/nodes" | jq -r '.nodes[] | .uuid'); do
-    name=$(curl -H "X-OpenStack-Ironic-API-Version: 1.9" -s "${ironic_url}/nodes/${node}" | jq -r .name)
-    echo "Host $name, UUID: $node"
-    # And use the baremetal operator tool to load the introspection data into
-    # the BareMetalHost CRs as annotations, which BMO then picks up.
-    HARDWARE_DETAILS=$(podman run --quiet --net=host \
-        --rm \
-        --entrypoint /get-hardware-details \
-        "${BAREMETAL_OPERATOR_IMAGE}" \
-        "${inspector_url}" "$node" | jq '{hardware: .}')
-
-     oc annotate --overwrite -n openshift-machine-api baremetalhosts "$name" 'baremetalhost.metal3.io/status'="$HARDWARE_DETAILS" 'baremetalhost.metal3.io/paused-'
+echo "Unpause all baremetal hosts"
+while ! oc annotate --overwrite -n openshift-machine-api baremetalhosts --all "baremetalhost.metal3.io/paused-" ; do
+    sleep 5
+    echo "Unpause failed, retrying"
 done
-
-touch /opt/openshift/.master-bmh-update.done

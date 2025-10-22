@@ -5,12 +5,11 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
-	"github.com/vmware/govmomi/object"
 	"github.com/vmware/govmomi/session"
 	"github.com/vmware/govmomi/vim25/mo"
 	vim25types "github.com/vmware/govmomi/vim25/types"
+	"go.uber.org/mock/gomock"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 
@@ -152,7 +151,8 @@ func validIPIMultiZoneInstallConfig() *types.InstallConfig {
 
 func TestPermissionValidate(t *testing.T) {
 	ctx := context.TODO()
-	server, err := mock.StartSimulator(true)
+	vs := mock.NewSimulator("8.0.2", "8.0.2", 24321653, 23825572)
+	server, err := vs.StartSimulator()
 	if err != nil {
 		t.Error(err)
 		return
@@ -174,9 +174,13 @@ func TestPermissionValidate(t *testing.T) {
 		return
 	}
 
-	rootFolder := object.NewRootFolder(client)
-	_, err = rootFolder.CreateFolder(ctx, "/DC0/vm/my-folder")
+	vmFolder, err := finder.Folder(ctx, "/DC0/vm")
+	if err != nil {
+		t.Error(err)
+		return
+	}
 
+	_, err = vmFolder.CreateFolder(ctx, "my-folder")
 	if err != nil {
 		t.Error(err)
 		return

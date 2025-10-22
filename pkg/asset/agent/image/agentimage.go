@@ -1,215 +1,215 @@
 package image
 
 import (
-	"encoding/json"
+	"context"
 	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 
+	"github.com/sirupsen/logrus"
+
 	"github.com/openshift/assisted-image-service/pkg/isoeditor"
-	"github.com/openshift/assisted-service/pkg/executer"
+	hiveext "github.com/openshift/assisted-service/api/hiveextension/v1beta1"
 	"github.com/openshift/installer/pkg/asset"
+	"github.com/openshift/installer/pkg/asset/agent/gencrypto"
+	"github.com/openshift/installer/pkg/asset/agent/joiner"
 	"github.com/openshift/installer/pkg/asset/agent/manifests"
-	"github.com/openshift/installer/pkg/asset/agent/mirror"
+	"github.com/openshift/installer/pkg/asset/agent/workflow"
+	workflowreport "github.com/openshift/installer/pkg/asset/agent/workflow/report"
 )
 
 const (
-	agentISOFilename = "agent.%s.iso"
+	agentISOFilename         = "agent.%s.iso"
+	agentAddNodesISOFilename = "node.%s.iso"
+	iso9660Level1ExtLen      = 3
 )
 
 // AgentImage is an asset that generates the bootable image used to install clusters.
 type AgentImage struct {
-	cpuArch      string
-	rendezvousIP string
-
-	tmpPath  string
-	volumeID string
+	cpuArch              string
+	rendezvousIP         string
+	tmpPath              string
+	volumeID             string
+	isoPath              string
+	rootFSURL            string
+	bootArtifactsBaseURL string
+	platform             hiveext.PlatformType
+	isoFilename          string
+	imageExpiresAt       string
+	minimalISO           bool
 }
 
 var _ asset.WritableAsset = (*AgentImage)(nil)
 
-// Dependencies returns the assets on which the Bootstrap asset depends.
+// Dependencies returns the assets on which the AgentImage asset depends.
 func (a *AgentImage) Dependencies() []asset.Asset {
 	return []asset.Asset{
-		&Ignition{},
-		&BaseIso{},
+		&workflow.AgentWorkflow{},
+		&joiner.ClusterInfo{},
+		&AgentArtifacts{},
 		&manifests.AgentManifests{},
-		&mirror.RegistriesConf{},
+		&BaseIso{},
+		&gencrypto.AuthConfig{},
 	}
 }
 
-// Generate generates the image file for to ISO asset.
-func (a *AgentImage) Generate(dependencies asset.Parents) error {
-	ignition := &Ignition{}
-	baseImage := &BaseIso{}
+// Generate generates the image file for an AgentImage asset.
+func (a *AgentImage) Generate(ctx context.Context, dependencies asset.Parents) error {
+	agentWorkflow := &workflow.AgentWorkflow{}
+	clusterInfo := &joiner.ClusterInfo{}
+	agentArtifacts := &AgentArtifacts{}
 	agentManifests := &manifests.AgentManifests{}
-	registriesConf := &mirror.RegistriesConf{}
+	baseIso := &BaseIso{}
+	dependencies.Get(agentArtifacts, agentManifests, baseIso, agentWorkflow, clusterInfo)
 
-	dependencies.Get(ignition, baseImage, agentManifests, registriesConf)
-
-	ignitionByte, err := json.Marshal(ignition.Config)
-	if err != nil {
+	if err := workflowreport.GetReport(ctx).Stage(workflow.StageGenerateISO); err != nil {
 		return err
 	}
 
-	agentTuiFiles, err := a.fetchAgentTuiFiles(agentManifests.ClusterImageSet.Spec.ReleaseImage, agentManifests.GetPullSecretData(), registriesConf.MirrorConfig)
-	if err != nil {
-		return err
+	switch agentWorkflow.Workflow {
+	case workflow.AgentWorkflowTypeInstall:
+		a.platform = agentManifests.AgentClusterInstall.Spec.PlatformType
+		a.isoFilename = agentISOFilename
+
+	case workflow.AgentWorkflowTypeAddNodes:
+		authConfig := &gencrypto.AuthConfig{}
+		dependencies.Get(authConfig)
+
+		a.platform = clusterInfo.PlatformType
+		a.isoFilename = agentAddNodesISOFilename
+		a.imageExpiresAt = authConfig.AuthTokenExpiry
+
+	default:
+		return fmt.Errorf("AgentWorkflowType value not supported: %s", agentWorkflow.Workflow)
 	}
 
-	err = a.prepareAgentISO(baseImage.File.Filename, ignitionByte, agentTuiFiles)
-	if err != nil {
-		return err
-	}
+	a.cpuArch = agentArtifacts.CPUArch
+	a.rendezvousIP = agentArtifacts.RendezvousIP
+	a.tmpPath = agentArtifacts.TmpPath
+	a.isoPath = agentArtifacts.ISOPath
+	a.bootArtifactsBaseURL = agentArtifacts.BootArtifactsBaseURL
+	a.minimalISO = agentArtifacts.MinimalISO
 
-	a.cpuArch = ignition.CPUArch
-	a.rendezvousIP = ignition.RendezvousIP
-
-	return nil
-}
-
-func (a *AgentImage) fetchAgentTuiFiles(releaseImage string, pullSecret string, mirrorConfig []mirror.RegistriesConfig) ([]string, error) {
-	release := NewRelease(&executer.CommonExecuter{},
-		Config{MaxTries: OcDefaultTries, RetryDelay: OcDefaultRetryDelay},
-		releaseImage, pullSecret, mirrorConfig)
-
-	agentTuiFilenames := []string{"/usr/bin/agent-tui", "/usr/lib64/libnmstate.so.1.3.3"}
-	files := []string{}
-
-	for _, srcFile := range agentTuiFilenames {
-		f, err := release.ExtractFile("agent-installer-node-agent", srcFile)
-		if err != nil {
-			return nil, err
-		}
-		// Make sure it could be executed
-		err = os.Chmod(f, 0o555)
-		if err != nil {
-			return nil, err
-		}
-		files = append(files, f)
-	}
-
-	return files, nil
-}
-
-func (a *AgentImage) prepareAgentISO(iso string, ignition []byte, additionalFiles []string) error {
-	// Create a tmp folder to store all the pieces required to generate the agent ISO.
-	tmpPath, err := os.MkdirTemp("", "agent")
-	if err != nil {
-		return err
-	}
-	a.tmpPath = tmpPath
-
-	err = isoeditor.Extract(iso, a.tmpPath)
-	if err != nil {
-		return err
-	}
-
-	err = a.updateIgnitionImg(ignition)
-	if err != nil {
-		return err
-	}
-
-	err = a.appendAgentFilesToInitrd(additionalFiles)
-	if err != nil {
-		return err
-	}
-
-	volumeID, err := isoeditor.VolumeIdentifier(iso)
+	volumeID, err := isoeditor.VolumeIdentifier(a.isoPath)
 	if err != nil {
 		return err
 	}
 	a.volumeID = volumeID
 
-	return nil
-}
-
-func (a *AgentImage) updateIgnitionImg(ignition []byte) error {
-	ca := NewCpioArchive()
-	err := ca.StoreBytes("config.ign", ignition, 0o644)
-	if err != nil {
-		return err
-	}
-	ignitionBuff, err := ca.SaveBuffer()
-	if err != nil {
-		return err
-	}
-
-	ignitionImgPath := filepath.Join(a.tmpPath, "images", "ignition.img")
-	fi, err := os.Stat(ignitionImgPath)
-	if err != nil {
-		return err
-	}
-
-	// Verify that the current compressed ignition archive does not exceed the
-	// embed area (usually 256 Kb)
-	if len(ignitionBuff) > int(fi.Size()) {
-		return fmt.Errorf("ignition content length (%d) exceeds embed area size (%d)", len(ignitionBuff), fi.Size())
-	}
-
-	ignitionImg, err := os.OpenFile(ignitionImgPath, os.O_WRONLY, 0)
-	if err != nil {
-		return err
-	}
-	defer ignitionImg.Close()
-
-	_, err = ignitionImg.Write(ignitionBuff)
-	if err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func (a *AgentImage) appendAgentFilesToInitrd(additionalFiles []string) error {
-	ca := NewCpioArchive()
-
-	dstPath := "/agent-files/"
-	err := ca.StorePath(dstPath)
-	if err != nil {
-		return err
-	}
-
-	// Add the required agent files to the archive
-	for _, f := range additionalFiles {
-		err := ca.StoreFile(f, dstPath)
-		if err != nil {
-			return err
+	if a.minimalISO {
+		// when the bootArtifactsBaseURL is specified, construct the custom rootfs URL
+		if a.bootArtifactsBaseURL != "" {
+			a.rootFSURL = fmt.Sprintf("%s/%s", a.bootArtifactsBaseURL, fmt.Sprintf("agent.%s-rootfs.img", a.cpuArch))
+			logrus.Debugf("Using custom rootfs URL: %s", a.rootFSURL)
+		} else {
+			// Default to the URL from the RHCOS streams file
+			defaultRootFSURL, err := baseIso.getRootFSURL(ctx, a.cpuArch)
+			if err != nil {
+				return err
+			}
+			a.rootFSURL = defaultRootFSURL
+			logrus.Debugf("Using default rootfs URL: %s", a.rootFSURL)
 		}
 	}
 
-	// Add a dracut hook to copy the files. The $NEWROOT environment variable is exported by
-	// dracut during the startup and it refers the mountpoint for the root filesystem.
-	dracutHookScript := `#!/bin/sh
-cp -R /agent-files/* $NEWROOT/usr/local/bin/
-# Fix the selinux label
-for i in $(find /agent-files/ -printf "%P\n"); do chcon system_u:object_r:bin_t:s0 $NEWROOT/usr/local/bin/$i; done`
-
-	err = ca.StoreBytes("/usr/lib/dracut/hooks/pre-pivot/99-agent-copy-files.sh", []byte(dracutHookScript), 0o755)
+	// Update Ignition images
+	err = a.updateIgnitionContent(agentArtifacts)
 	if err != nil {
 		return err
 	}
 
-	buff, err := ca.SaveBuffer()
-	if err != nil {
-		return err
-	}
-
-	// Append the archive to initrd.img
-	initrdImgPath := filepath.Join(a.tmpPath, "images", "pxeboot", "initrd.img")
-	initrdImg, err := os.OpenFile(initrdImgPath, os.O_WRONLY|os.O_APPEND, 0)
-	if err != nil {
-		return err
-	}
-	defer initrdImg.Close()
-
-	_, err = initrdImg.Write(buff)
+	err = a.appendKargs(agentArtifacts.Kargs)
 	if err != nil {
 		return err
 	}
 
 	return nil
+}
+
+// updateIgnitionContent updates the ignition data into the corresponding images in the ISO.
+func (a *AgentImage) updateIgnitionContent(agentArtifacts *AgentArtifacts) error {
+	ignitionc := &isoeditor.IgnitionContent{}
+	ignitionc.Config = agentArtifacts.IgnitionByte
+	fileInfo, err := isoeditor.NewIgnitionImageReader(a.isoPath, ignitionc)
+	if err != nil {
+		return err
+	}
+
+	return a.overwriteFileData(fileInfo)
+}
+
+func (a *AgentImage) overwriteFileData(fileInfo []isoeditor.FileData) error {
+	var errs []error
+	for _, fileData := range fileInfo {
+		defer fileData.Data.Close()
+
+		filename := filepath.Join(a.tmpPath, fileData.Filename)
+		file, err := os.Create(filename)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		defer file.Close()
+
+		_, err = io.Copy(file, fileData.Data)
+		if err != nil {
+			errs = append(errs, err)
+		}
+	}
+
+	return errors.Join(errs...)
+}
+
+func (a *AgentImage) appendKargs(kargs string) error {
+	if kargs == "" {
+		return nil
+	}
+
+	fileInfo, err := isoeditor.NewKargsReader(a.isoPath, kargs)
+	if err != nil {
+		return err
+	}
+	return a.overwriteFileData(fileInfo)
+}
+
+// normalizeFilesExtension scans the extracted ISO files and trims
+// the file extensions longer than three chars.
+func (a *AgentImage) normalizeFilesExtension() error {
+	var skipFiles = map[string]bool{
+		"boot.catalog": true, // Required for arm64 iso
+	}
+
+	return filepath.WalkDir(a.tmpPath, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+
+		if d.IsDir() {
+			return nil
+		}
+
+		ext := filepath.Ext(p)
+		// ext includes also the dot separator
+		if len(ext) > iso9660Level1ExtLen+1 {
+			b := filepath.Base(p)
+			if _, ok := skipFiles[filepath.Base(b)]; ok {
+				return nil
+			}
+
+			// Replaces file extensions longer than three chars
+			np := p[:len(p)-len(ext)] + ext[:iso9660Level1ExtLen+1]
+			err = os.Rename(p, np)
+
+			if err != nil {
+				return err
+			}
+		}
+
+		return nil
+	})
 }
 
 // PersistToFile writes the iso image in the assets folder
@@ -222,19 +222,57 @@ func (a *AgentImage) PersistToFile(directory string) error {
 		return errors.New("cannot generate ISO image due to configuration errors")
 	}
 
-	agentIsoFile := filepath.Join(directory, fmt.Sprintf(agentISOFilename, a.cpuArch))
+	agentIsoFile := filepath.Join(directory, fmt.Sprintf(a.isoFilename, a.cpuArch))
 
 	// Remove symlink if it exists
 	os.Remove(agentIsoFile)
 
-	err := isoeditor.Create(agentIsoFile, a.tmpPath, a.volumeID)
+	err := a.normalizeFilesExtension()
 	if err != nil {
 		return err
 	}
 
+	var msg string
+	// For minimal ISO, when the bootArtifactsBaseURL is specified,
+	// output the rootfs file alongside the minimal ISO
+	if a.minimalISO {
+		if a.bootArtifactsBaseURL != "" {
+			bootArtifactsFullPath := filepath.Join(directory, bootArtifactsPath)
+			err := createDir(bootArtifactsFullPath)
+			if err != nil {
+				return err
+			}
+			err = extractRootFS(bootArtifactsFullPath, a.tmpPath, agentFilePrefix, a.cpuArch)
+			if err != nil {
+				return err
+			}
+			logrus.Infof("RootFS file created in: %s. Upload it at %s", bootArtifactsFullPath, a.rootFSURL)
+		}
+		err = isoeditor.CreateMinimalISO(a.tmpPath, a.volumeID, a.rootFSURL, a.cpuArch, agentIsoFile)
+		if err != nil {
+			return err
+		}
+		msg = fmt.Sprintf("Generated minimal ISO at %s", agentIsoFile)
+	} else {
+		// Generate full ISO
+		err = isoeditor.Create(agentIsoFile, a.tmpPath, a.volumeID)
+		if err != nil {
+			return err
+		}
+		msg = fmt.Sprintf("Generated ISO at %s.", agentIsoFile)
+	}
+	if a.imageExpiresAt != "" {
+		msg = fmt.Sprintf("%s The ISO is valid up to %s", msg, a.imageExpiresAt)
+	}
+	logrus.Info(msg)
+
 	err = os.WriteFile(filepath.Join(directory, "rendezvousIP"), []byte(a.rendezvousIP), 0o644) //nolint:gosec // no sensitive info
 	if err != nil {
 		return err
+	}
+	// For external platform OCI, add CCM manifests in the openshift directory.
+	if a.platform == hiveext.ExternalPlatformType {
+		logrus.Infof("When using %s oci platform, always make sure CCM manifests were added in the %s directory.", hiveext.ExternalPlatformType, manifests.OpenshiftManifestDir())
 	}
 
 	return nil

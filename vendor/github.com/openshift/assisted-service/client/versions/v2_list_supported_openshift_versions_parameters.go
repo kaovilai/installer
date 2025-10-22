@@ -14,6 +14,7 @@ import (
 	"github.com/go-openapi/runtime"
 	cr "github.com/go-openapi/runtime/client"
 	"github.com/go-openapi/strfmt"
+	"github.com/go-openapi/swag"
 )
 
 // NewV2ListSupportedOpenshiftVersionsParams creates a new V2ListSupportedOpenshiftVersionsParams object,
@@ -52,12 +53,27 @@ func NewV2ListSupportedOpenshiftVersionsParamsWithHTTPClient(client *http.Client
 	}
 }
 
-/* V2ListSupportedOpenshiftVersionsParams contains all the parameters to send to the API endpoint
-   for the v2 list supported openshift versions operation.
+/*
+V2ListSupportedOpenshiftVersionsParams contains all the parameters to send to the API endpoint
 
-   Typically these are written to a http.Request.
+	for the v2 list supported openshift versions operation.
+
+	Typically these are written to a http.Request.
 */
 type V2ListSupportedOpenshiftVersionsParams struct {
+
+	/* OnlyLatest.
+
+	   If true, returns only the latest version for each minor.
+	*/
+	OnlyLatest *bool
+
+	/* Version.
+
+	   Retrieves only the versions that contain the specified substring in their display name.
+	*/
+	Version *string
+
 	timeout    time.Duration
 	Context    context.Context
 	HTTPClient *http.Client
@@ -111,6 +127,28 @@ func (o *V2ListSupportedOpenshiftVersionsParams) SetHTTPClient(client *http.Clie
 	o.HTTPClient = client
 }
 
+// WithOnlyLatest adds the onlyLatest to the v2 list supported openshift versions params
+func (o *V2ListSupportedOpenshiftVersionsParams) WithOnlyLatest(onlyLatest *bool) *V2ListSupportedOpenshiftVersionsParams {
+	o.SetOnlyLatest(onlyLatest)
+	return o
+}
+
+// SetOnlyLatest adds the onlyLatest to the v2 list supported openshift versions params
+func (o *V2ListSupportedOpenshiftVersionsParams) SetOnlyLatest(onlyLatest *bool) {
+	o.OnlyLatest = onlyLatest
+}
+
+// WithVersion adds the version to the v2 list supported openshift versions params
+func (o *V2ListSupportedOpenshiftVersionsParams) WithVersion(version *string) *V2ListSupportedOpenshiftVersionsParams {
+	o.SetVersion(version)
+	return o
+}
+
+// SetVersion adds the version to the v2 list supported openshift versions params
+func (o *V2ListSupportedOpenshiftVersionsParams) SetVersion(version *string) {
+	o.Version = version
+}
+
 // WriteToRequest writes these params to a swagger request
 func (o *V2ListSupportedOpenshiftVersionsParams) WriteToRequest(r runtime.ClientRequest, reg strfmt.Registry) error {
 
@@ -118,6 +156,40 @@ func (o *V2ListSupportedOpenshiftVersionsParams) WriteToRequest(r runtime.Client
 		return err
 	}
 	var res []error
+
+	if o.OnlyLatest != nil {
+
+		// query param only_latest
+		var qrOnlyLatest bool
+
+		if o.OnlyLatest != nil {
+			qrOnlyLatest = *o.OnlyLatest
+		}
+		qOnlyLatest := swag.FormatBool(qrOnlyLatest)
+		if qOnlyLatest != "" {
+
+			if err := r.SetQueryParam("only_latest", qOnlyLatest); err != nil {
+				return err
+			}
+		}
+	}
+
+	if o.Version != nil {
+
+		// query param version
+		var qrVersion string
+
+		if o.Version != nil {
+			qrVersion = *o.Version
+		}
+		qVersion := qrVersion
+		if qVersion != "" {
+
+			if err := r.SetQueryParam("version", qVersion); err != nil {
+				return err
+			}
+		}
+	}
 
 	if len(res) > 0 {
 		return errors.CompositeValidationError(res...)

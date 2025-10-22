@@ -48,7 +48,7 @@ func TestValidateMachinePool(t *testing.T) {
 					DiskType: "pd-",
 				},
 			},
-			expected: `^test-path\.diskType: Unsupported value: "pd-": supported values: "pd-ssd", "pd-standard"$`,
+			expected: `^test-path\.diskType: Unsupported value: "pd-": supported values: "hyperdisk-balanced", "pd-balanced", "pd-ssd", "pd-standard"$`,
 		},
 		{
 			name: "valid disk size",
@@ -84,6 +84,14 @@ func TestValidateMachinePool(t *testing.T) {
 				},
 			},
 			expected: `^test-path\.diskSizeGB: Invalid value: 66000: exceeding maximum GCP disk size limit, must be below 65536$`,
+		},
+		{
+			name: "IntelTrustedDomainExtensions confidential compute with supported machine type",
+			pool: &gcp.MachinePool{
+				InstanceType:        "c3-standard-4",
+				ConfidentialCompute: string(gcp.ConfidentialComputePolicyTDX),
+				OnHostMaintenance:   string(gcp.OnHostMaintenanceTerminate),
+			},
 		},
 	}
 	for _, tc := range cases {

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/sirupsen/logrus"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	utilsslice "k8s.io/utils/strings/slices"
 
@@ -34,7 +35,6 @@ func ConvertInstallConfig(config *types.InstallConfig) error {
 		return field.Invalid(field.NewPath("apiVersion"), config.APIVersion, fmt.Sprintf("cannot upconvert from version %s", config.APIVersion))
 	}
 	convertNetworking(config)
-
 	switch config.Platform.Name() {
 	case baremetal.Name:
 		if err := convertBaremetal(config); err != nil {
@@ -96,10 +96,13 @@ func convertNetworking(config *types.InstallConfig) {
 		netconf.NetworkType = netconf.DeprecatedType
 	}
 
-	// Recognize the OpenShiftSDN network plugin name regardless of capitalization, for
+	// Recognize the network plugin name regardless of capitalization, for
 	// backward compatibility
-	if strings.ToLower(netconf.NetworkType) == strings.ToLower(string(operv1.NetworkTypeOpenShiftSDN)) {
+	if strings.EqualFold(netconf.NetworkType, string(operv1.NetworkTypeOpenShiftSDN)) {
 		netconf.NetworkType = string(operv1.NetworkTypeOpenShiftSDN)
+	}
+	if strings.EqualFold(netconf.NetworkType, string(operv1.NetworkTypeOVNKubernetes)) {
+		netconf.NetworkType = string(operv1.NetworkTypeOVNKubernetes)
 	}
 
 	// Convert hostSubnetLength to hostPrefix
@@ -169,12 +172,57 @@ func convertOpenStack(config *types.InstallConfig) error {
 		config.Platform.OpenStack.DefaultMachinePlatform.FlavorName = config.Platform.OpenStack.DeprecatedFlavorName
 	}
 
+	// type has been deprecated in favor of types in the machinePools.
+	if config.ControlPlane != nil &&
+		config.ControlPlane.Platform.OpenStack != nil &&
+		config.ControlPlane.Platform.OpenStack.RootVolume != nil &&
+		config.ControlPlane.Platform.OpenStack.RootVolume.DeprecatedType != "" {
+		if len(config.ControlPlane.Platform.OpenStack.RootVolume.Types) > 0 {
+			// Return error if both type and types of rootVolume are specified in the config
+			return field.Forbidden(field.NewPath("controlPlane").Child("platform").Child("openstack").Child("rootVolume").Child("type"), "cannot specify type and types in rootVolume together")
+		}
+		config.ControlPlane.Platform.OpenStack.RootVolume.Types = []string{config.ControlPlane.Platform.OpenStack.RootVolume.DeprecatedType}
+		config.ControlPlane.Platform.OpenStack.RootVolume.DeprecatedType = ""
+	}
+	for _, pool := range config.Compute {
+		mpool := pool.Platform.OpenStack
+		if mpool != nil && mpool.RootVolume != nil && mpool.RootVolume.DeprecatedType != "" {
+			if mpool.RootVolume.Types != nil && len(mpool.RootVolume.Types) > 0 {
+				// Return error if both type and types of rootVolume are specified in the config
+				return field.Forbidden(field.NewPath("compute").Child("platform").Child("openstack").Child("rootVolume").Child("type"), "cannot specify type and types in rootVolume together")
+			}
+			mpool.RootVolume.Types = []string{mpool.RootVolume.DeprecatedType}
+			mpool.RootVolume.DeprecatedType = ""
+		}
+	}
+	if config.Platform.OpenStack.DefaultMachinePlatform != nil && config.Platform.OpenStack.DefaultMachinePlatform.RootVolume != nil && config.Platform.OpenStack.DefaultMachinePlatform.RootVolume.DeprecatedType != "" {
+		if len(config.Platform.OpenStack.DefaultMachinePlatform.RootVolume.Types) > 0 {
+			// Return error if both type and types of defaultMachinePlatform are specified in the config
+			return field.Forbidden(field.NewPath("platform").Child("openstack").Child("type"), "cannot specify type and types in defaultMachinePlatform together")
+		}
+		config.Platform.OpenStack.DefaultMachinePlatform.RootVolume.Types = []string{config.Platform.OpenStack.DefaultMachinePlatform.RootVolume.DeprecatedType}
+		config.Platform.OpenStack.DefaultMachinePlatform.RootVolume.DeprecatedType = ""
+	}
+
 	if err := upconvertVIP(&config.Platform.OpenStack.APIVIPs, config.Platform.OpenStack.DeprecatedAPIVIP, "apiVIP", "apiVIPs", field.NewPath("platform").Child("openstack")); err != nil {
 		return err
 	}
 
 	if err := upconvertVIP(&config.Platform.OpenStack.IngressVIPs, config.Platform.OpenStack.DeprecatedIngressVIP, "ingressVIP", "ingressVIPs", field.NewPath("platform").Child("openstack")); err != nil {
 		return err
+	}
+
+	// machinesSubnet has been deprecated in favor of ControlPlanePort
+	controlPlanePort := config.Platform.OpenStack.ControlPlanePort
+	deprecatedMachinesSubnet := config.Platform.OpenStack.DeprecatedMachinesSubnet
+	if deprecatedMachinesSubnet != "" && controlPlanePort == nil {
+		fixedIPs := []openstack.FixedIP{{Subnet: openstack.SubnetFilter{ID: deprecatedMachinesSubnet}}}
+		config.Platform.OpenStack.ControlPlanePort = &openstack.PortTarget{FixedIPs: fixedIPs}
+	} else if deprecatedMachinesSubnet != "" &&
+		controlPlanePort != nil {
+		if !(len(controlPlanePort.FixedIPs) == 1 && controlPlanePort.FixedIPs[0].Subnet.ID == deprecatedMachinesSubnet) {
+			return field.Invalid(field.NewPath("platform").Child("openstack").Child("machinesSubnet"), deprecatedMachinesSubnet, fmt.Sprintf("%s is deprecated; only %s needs to be specified", "machinesSubnet", "controlPlanePort"))
+		}
 	}
 
 	return nil
@@ -237,9 +285,34 @@ func upconvertVIP(newVIPValues *[]string, oldVIPValue, newFieldName, oldFieldNam
 
 // convertAWS upconverts deprecated fields in the AWS platform.
 func convertAWS(config *types.InstallConfig) error {
-	// Deprecated ExperimentalPropagateUserTag takes precedence when set
-	if config.Platform.AWS.ExperimentalPropagateUserTag != nil {
-		config.Platform.AWS.PropagateUserTag = *config.Platform.AWS.ExperimentalPropagateUserTag
+	// BestEffortDeleteIgnition takes precedence when set
+	if !config.AWS.BestEffortDeleteIgnition {
+		config.AWS.BestEffortDeleteIgnition = config.AWS.PreserveBootstrapIgnition
 	}
+	if ami := config.AWS.AMIID; len(ami) > 0 {
+		if config.AWS.DefaultMachinePlatform == nil {
+			config.AWS.DefaultMachinePlatform = &aws.MachinePool{}
+		}
+		// DefaultMachinePlatform.AMIID takes precedence in the machine manifest code anyway
+		if len(config.AWS.DefaultMachinePlatform.AMIID) == 0 {
+			config.AWS.DefaultMachinePlatform.AMIID = ami
+		}
+	}
+
+	// Subnets field is deprecated in favor of VPC.Subnets.
+	fldPath := field.NewPath("platform", "aws")
+	if len(config.AWS.DeprecatedSubnets) > 0 && len(config.AWS.VPC.Subnets) > 0 { // nolint: staticcheck
+		return field.Forbidden(fldPath.Child("subnets"), fmt.Sprintf("cannot specify %s and %s together", fldPath.Child("subnets"), fldPath.Child("vpc", "subnets")))
+	} else if len(config.AWS.DeprecatedSubnets) > 0 { // nolint: staticcheck
+		var subnets []aws.Subnet
+		for _, subnetID := range config.AWS.DeprecatedSubnets { // nolint: staticcheck
+			subnets = append(subnets, aws.Subnet{
+				ID: aws.AWSSubnetID(subnetID),
+			})
+		}
+		config.AWS.VPC.Subnets = subnets
+		logrus.Warnf("%s is deprecated. Converted to %s", fldPath.Child("subnets"), fldPath.Child("vpc", "subnets"))
+	}
+
 	return nil
 }

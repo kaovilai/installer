@@ -1,11 +1,12 @@
 package powervs
 
 import (
+	"context"
+	"fmt"
 	"math"
 	"strings"
 	"time"
 
-	"github.com/pkg/errors"
 	"k8s.io/apimachinery/pkg/util/wait"
 )
 
@@ -16,6 +17,12 @@ const (
 // listPowerInstances lists instances in the power server.
 func (o *ClusterUninstaller) listPowerInstances() (cloudResources, error) {
 	o.Logger.Debugf("Listing virtual Power service instances (%s)", o.InfraID)
+
+	if o.instanceClient == nil {
+		o.Logger.Infof("Skipping deleting Power service instances because no service instance was found")
+		result := []cloudResource{}
+		return cloudResources{}.insert(result...), nil
+	}
 
 	instances, err := o.instanceClient.GetAll()
 	if err != nil {
@@ -89,14 +96,14 @@ func (o *ClusterUninstaller) destroyPowerInstances() error {
 
 	items := o.insertPendingItems(powerInstanceTypeName, firstPassList.list())
 
-	ctx, cancel := o.contextWithTimeout()
+	ctx, cancel := contextWithTimeout()
 	defer cancel()
 
 	for _, item := range items {
 		select {
 		case <-ctx.Done():
 			o.Logger.Debugf("destroyPowerInstances: case <-ctx.Done()")
-			return o.Context.Err() // we're cancelled, abort
+			return ctx.Err() // we're cancelled, abort
 		default:
 		}
 
@@ -105,7 +112,7 @@ func (o *ClusterUninstaller) destroyPowerInstances() error {
 			Factor:   1.1,
 			Cap:      leftInContext(ctx),
 			Steps:    math.MaxInt32}
-		err = wait.ExponentialBackoffWithContext(ctx, backoff, func() (bool, error) {
+		err = wait.ExponentialBackoffWithContext(ctx, backoff, func(context.Context) (bool, error) {
 			err2 := o.destroyPowerInstance(item)
 			if err2 == nil {
 				return true, err2
@@ -122,7 +129,7 @@ func (o *ClusterUninstaller) destroyPowerInstances() error {
 		for _, item := range items {
 			o.Logger.Debugf("destroyPowerInstances: found %s in pending items", item.name)
 		}
-		return errors.Errorf("destroyPowerInstances: %d undeleted items pending", len(items))
+		return fmt.Errorf("destroyPowerInstances: %d undeleted items pending", len(items))
 	}
 
 	backoff := wait.Backoff{
@@ -130,7 +137,7 @@ func (o *ClusterUninstaller) destroyPowerInstances() error {
 		Factor:   1.1,
 		Cap:      leftInContext(ctx),
 		Steps:    math.MaxInt32}
-	err = wait.ExponentialBackoffWithContext(ctx, backoff, func() (bool, error) {
+	err = wait.ExponentialBackoffWithContext(ctx, backoff, func(context.Context) (bool, error) {
 		secondPassList, err2 := o.listPowerInstances()
 		if err2 != nil {
 			return false, err2

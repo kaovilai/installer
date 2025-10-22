@@ -32,6 +32,9 @@ type API interface {
 	   GetClusterSupportedPlatforms A list of platforms that this cluster can support in its current configuration.*/
 	GetClusterSupportedPlatforms(ctx context.Context, params *GetClusterSupportedPlatformsParams) (*GetClusterSupportedPlatformsOK, error)
 	/*
+	   GetDetailedSupportedFeatures Retrieves detailed features information including support level, incompatibilities, and operator dependencies.*/
+	GetDetailedSupportedFeatures(ctx context.Context, params *GetDetailedSupportedFeaturesParams) (*GetDetailedSupportedFeaturesOK, error)
+	/*
 	   GetInfraEnv Retrieves the details of the infra-env.*/
 	GetInfraEnv(ctx context.Context, params *GetInfraEnvParams) (*GetInfraEnvOK, error)
 	/*
@@ -40,6 +43,12 @@ type API interface {
 	/*
 	   GetInfraEnvPresignedFileURL Creates a new pre-signed download URL for the infra-env.*/
 	GetInfraEnvPresignedFileURL(ctx context.Context, params *GetInfraEnvPresignedFileURLParams) (*GetInfraEnvPresignedFileURLOK, error)
+	/*
+	   GetSupportedArchitectures Retrieves the architecture support-levels for each OpenShift version.*/
+	GetSupportedArchitectures(ctx context.Context, params *GetSupportedArchitecturesParams) (*GetSupportedArchitecturesOK, error)
+	/*
+	   GetSupportedFeatures Retrieves the features support levels for each OpenShift version.*/
+	GetSupportedFeatures(ctx context.Context, params *GetSupportedFeaturesParams) (*GetSupportedFeaturesOK, error)
 	/*
 	   ListClusterHosts Get a list of cluster hosts according to supplied filters.*/
 	ListClusterHosts(ctx context.Context, params *ListClusterHostsParams) (*ListClusterHostsOK, error)
@@ -53,7 +62,10 @@ type API interface {
 	   RegisterInfraEnv Creates a new OpenShift Discovery ISO.*/
 	RegisterInfraEnv(ctx context.Context, params *RegisterInfraEnvParams) (*RegisterInfraEnvCreated, error)
 	/*
-	   TransformClusterToDay2 Transforming cluster to day2 and allowing adding hosts*/
+	   TransformClusterToAddingHosts Transforms installed cluster to a state which allows adding hosts.*/
+	TransformClusterToAddingHosts(ctx context.Context, params *TransformClusterToAddingHostsParams) (*TransformClusterToAddingHostsAccepted, error)
+	/*
+	   TransformClusterToDay2 Deprecated, maintained for legacy purposes. Does the same thing as allow-add-hosts. Use allow-add-hosts instead.*/
 	TransformClusterToDay2(ctx context.Context, params *TransformClusterToDay2Params) (*TransformClusterToDay2Accepted, error)
 	/*
 	   UnbindHost Unbind host to a cluster*/
@@ -77,6 +89,9 @@ type API interface {
 	   V2GetClusterDefaultConfig Get the default values for various cluster properties.*/
 	V2GetClusterDefaultConfig(ctx context.Context, params *V2GetClusterDefaultConfigParams) (*V2GetClusterDefaultConfigOK, error)
 	/*
+	   V2GetClusterUISettings Fetch cluster specific UI settings.*/
+	V2GetClusterUISettings(ctx context.Context, params *V2GetClusterUISettingsParams) (*V2GetClusterUISettingsOK, error)
+	/*
 	   V2GetCredentials Get the cluster admin credentials.*/
 	V2GetCredentials(ctx context.Context, params *V2GetCredentialsParams) (*V2GetCredentialsOK, error)
 	/*
@@ -88,6 +103,9 @@ type API interface {
 	/*
 	   V2UpdateCluster Updates an OpenShift cluster definition.*/
 	V2UpdateCluster(ctx context.Context, params *V2UpdateClusterParams) (*V2UpdateClusterCreated, error)
+	/*
+	   V2UpdateClusterUISettings Update cluster specific UI settings.*/
+	V2UpdateClusterUISettings(ctx context.Context, params *V2UpdateClusterUISettingsParams) (*V2UpdateClusterUISettingsOK, error)
 	/*
 	   V2UploadLogs Agent API to upload logs.*/
 	V2UploadLogs(ctx context.Context, params *V2UploadLogsParams) (*V2UploadLogsNoContent, error)
@@ -119,13 +137,16 @@ type API interface {
 	   V2GetHostIgnition Fetch the ignition file for this host as a string. In case of unbound host produces an error*/
 	V2GetHostIgnition(ctx context.Context, params *V2GetHostIgnitionParams) (*V2GetHostIgnitionOK, error)
 	/*
+	   V2GetIgnoredValidations Fetch the validations which are to be ignored for this cluster.*/
+	V2GetIgnoredValidations(ctx context.Context, params *V2GetIgnoredValidationsParams) (*V2GetIgnoredValidationsOK, error)
+	/*
 	   V2GetNextSteps Retrieves the next operations that the host agent needs to perform.*/
 	V2GetNextSteps(ctx context.Context, params *V2GetNextStepsParams) (*V2GetNextStepsOK, error)
 	/*
 	   V2GetPreflightRequirements Get preflight requirements for a cluster.*/
 	V2GetPreflightRequirements(ctx context.Context, params *V2GetPreflightRequirementsParams) (*V2GetPreflightRequirementsOK, error)
 	/*
-	   V2ImportCluster Import an AI cluster using minimal data assosiated with existing OCP cluster, in order to allow adding day2 hosts to that cluster*/
+	   V2ImportCluster Import an AI cluster using minimal data associated with existing OCP cluster, in order to allow adding day2 hosts to that cluster*/
 	V2ImportCluster(ctx context.Context, params *V2ImportClusterParams) (*V2ImportClusterCreated, error)
 	/*
 	   V2InstallCluster Installs the OpenShift cluster.*/
@@ -137,9 +158,6 @@ type API interface {
 	   V2ListClusters Retrieves the list of OpenShift clusters.*/
 	V2ListClusters(ctx context.Context, params *V2ListClustersParams) (*V2ListClustersOK, error)
 	/*
-	   V2ListFeatureSupportLevels Retrieves the support levels for features for each OpenShift version.*/
-	V2ListFeatureSupportLevels(ctx context.Context, params *V2ListFeatureSupportLevelsParams) (*V2ListFeatureSupportLevelsOK, error)
-	/*
 	   V2ListHosts Retrieves the list of OpenShift hosts that belong the infra-env.*/
 	V2ListHosts(ctx context.Context, params *V2ListHostsParams) (*V2ListHostsOK, error)
 	/*
@@ -148,6 +166,9 @@ type API interface {
 	/*
 	   V2RegisterCluster Creates a new OpenShift cluster definition.*/
 	V2RegisterCluster(ctx context.Context, params *V2RegisterClusterParams) (*V2RegisterClusterCreated, error)
+	/*
+	   V2RegisterDisconnectedCluster Create a disconnected OpenShift cluster for offline installation with embedded ignition*/
+	V2RegisterDisconnectedCluster(ctx context.Context, params *V2RegisterDisconnectedClusterParams) (*V2RegisterDisconnectedClusterCreated, error)
 	/*
 	   V2RegisterHost Registers a new OpenShift agent.*/
 	V2RegisterHost(ctx context.Context, params *V2RegisterHostParams) (*V2RegisterHostCreated, error)
@@ -162,6 +183,12 @@ type API interface {
 
 	   Reset failed host validation. It may be performed on any host validation with persistent validation result.*/
 	V2ResetHostValidation(ctx context.Context, params *V2ResetHostValidationParams) (*V2ResetHostValidationOK, error)
+	/*
+	   V2SetIgnoredValidations Register the validations which are to be ignored for this cluster.*/
+	V2SetIgnoredValidations(ctx context.Context, params *V2SetIgnoredValidationsParams) (*V2SetIgnoredValidationsCreated, error)
+	/*
+	   V2UpdateClusterFinalizingProgress Update installation finalizing progress.*/
+	V2UpdateClusterFinalizingProgress(ctx context.Context, params *V2UpdateClusterFinalizingProgressParams) (*V2UpdateClusterFinalizingProgressOK, error)
 	/*
 	   V2UpdateClusterInstallConfig Override values in the install config.*/
 	V2UpdateClusterInstallConfig(ctx context.Context, params *V2UpdateClusterInstallConfigParams) (*V2UpdateClusterInstallConfigCreated, error)
@@ -258,7 +285,6 @@ func (a *Client) DeregisterInfraEnv(ctx context.Context, params *DeregisterInfra
 
 /*
 DownloadMinimalInitrd Get the initial ramdisk for minimal ISO based installations.
-
 */
 func (a *Client) DownloadMinimalInitrd(ctx context.Context, params *DownloadMinimalInitrdParams, writer io.Writer) (*DownloadMinimalInitrdOK, *DownloadMinimalInitrdNoContent, error) {
 
@@ -310,6 +336,31 @@ func (a *Client) GetClusterSupportedPlatforms(ctx context.Context, params *GetCl
 		return nil, err
 	}
 	return result.(*GetClusterSupportedPlatformsOK), nil
+
+}
+
+/*
+GetDetailedSupportedFeatures Retrieves detailed features information including support level, incompatibilities, and operator dependencies.
+*/
+func (a *Client) GetDetailedSupportedFeatures(ctx context.Context, params *GetDetailedSupportedFeaturesParams) (*GetDetailedSupportedFeaturesOK, error) {
+
+	result, err := a.transport.Submit(&runtime.ClientOperation{
+		ID:                 "GetDetailedSupportedFeatures",
+		Method:             "GET",
+		PathPattern:        "/v2/support-levels/features/detailed",
+		ProducesMediaTypes: []string{"application/json"},
+		ConsumesMediaTypes: []string{"application/json"},
+		Schemes:            []string{"http", "https"},
+		Params:             params,
+		Reader:             &GetDetailedSupportedFeaturesReader{formats: a.formats},
+		AuthInfo:           a.authInfo,
+		Context:            ctx,
+		Client:             params.HTTPClient,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result.(*GetDetailedSupportedFeaturesOK), nil
 
 }
 
@@ -385,6 +436,56 @@ func (a *Client) GetInfraEnvPresignedFileURL(ctx context.Context, params *GetInf
 		return nil, err
 	}
 	return result.(*GetInfraEnvPresignedFileURLOK), nil
+
+}
+
+/*
+GetSupportedArchitectures Retrieves the architecture support-levels for each OpenShift version.
+*/
+func (a *Client) GetSupportedArchitectures(ctx context.Context, params *GetSupportedArchitecturesParams) (*GetSupportedArchitecturesOK, error) {
+
+	result, err := a.transport.Submit(&runtime.ClientOperation{
+		ID:                 "GetSupportedArchitectures",
+		Method:             "GET",
+		PathPattern:        "/v2/support-levels/architectures",
+		ProducesMediaTypes: []string{"application/json"},
+		ConsumesMediaTypes: []string{"application/json"},
+		Schemes:            []string{"http", "https"},
+		Params:             params,
+		Reader:             &GetSupportedArchitecturesReader{formats: a.formats},
+		AuthInfo:           a.authInfo,
+		Context:            ctx,
+		Client:             params.HTTPClient,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result.(*GetSupportedArchitecturesOK), nil
+
+}
+
+/*
+GetSupportedFeatures Retrieves the features support levels for each OpenShift version.
+*/
+func (a *Client) GetSupportedFeatures(ctx context.Context, params *GetSupportedFeaturesParams) (*GetSupportedFeaturesOK, error) {
+
+	result, err := a.transport.Submit(&runtime.ClientOperation{
+		ID:                 "GetSupportedFeatures",
+		Method:             "GET",
+		PathPattern:        "/v2/support-levels/features",
+		ProducesMediaTypes: []string{"application/json"},
+		ConsumesMediaTypes: []string{"application/json"},
+		Schemes:            []string{"http", "https"},
+		Params:             params,
+		Reader:             &GetSupportedFeaturesReader{formats: a.formats},
+		AuthInfo:           a.authInfo,
+		Context:            ctx,
+		Client:             params.HTTPClient,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result.(*GetSupportedFeaturesOK), nil
 
 }
 
@@ -489,7 +590,32 @@ func (a *Client) RegisterInfraEnv(ctx context.Context, params *RegisterInfraEnvP
 }
 
 /*
-TransformClusterToDay2 Transforming cluster to day2 and allowing adding hosts
+TransformClusterToAddingHosts Transforms installed cluster to a state which allows adding hosts.
+*/
+func (a *Client) TransformClusterToAddingHosts(ctx context.Context, params *TransformClusterToAddingHostsParams) (*TransformClusterToAddingHostsAccepted, error) {
+
+	result, err := a.transport.Submit(&runtime.ClientOperation{
+		ID:                 "TransformClusterToAddingHosts",
+		Method:             "POST",
+		PathPattern:        "/v2/clusters/{cluster_id}/actions/allow-add-hosts",
+		ProducesMediaTypes: []string{"application/json"},
+		ConsumesMediaTypes: []string{"application/json"},
+		Schemes:            []string{"http", "https"},
+		Params:             params,
+		Reader:             &TransformClusterToAddingHostsReader{formats: a.formats},
+		AuthInfo:           a.authInfo,
+		Context:            ctx,
+		Client:             params.HTTPClient,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result.(*TransformClusterToAddingHostsAccepted), nil
+
+}
+
+/*
+TransformClusterToDay2 Deprecated, maintained for legacy purposes. Does the same thing as allow-add-hosts. Use allow-add-hosts instead.
 */
 func (a *Client) TransformClusterToDay2(ctx context.Context, params *TransformClusterToDay2Params) (*TransformClusterToDay2Accepted, error) {
 
@@ -689,6 +815,31 @@ func (a *Client) V2GetClusterDefaultConfig(ctx context.Context, params *V2GetClu
 }
 
 /*
+V2GetClusterUISettings Fetch cluster specific UI settings.
+*/
+func (a *Client) V2GetClusterUISettings(ctx context.Context, params *V2GetClusterUISettingsParams) (*V2GetClusterUISettingsOK, error) {
+
+	result, err := a.transport.Submit(&runtime.ClientOperation{
+		ID:                 "V2GetClusterUISettings",
+		Method:             "GET",
+		PathPattern:        "/v2/clusters/{cluster_id}/ui-settings",
+		ProducesMediaTypes: []string{"application/json"},
+		ConsumesMediaTypes: []string{"application/json"},
+		Schemes:            []string{"http", "https"},
+		Params:             params,
+		Reader:             &V2GetClusterUISettingsReader{formats: a.formats},
+		AuthInfo:           a.authInfo,
+		Context:            ctx,
+		Client:             params.HTTPClient,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result.(*V2GetClusterUISettingsOK), nil
+
+}
+
+/*
 V2GetCredentials Get the cluster admin credentials.
 */
 func (a *Client) V2GetCredentials(ctx context.Context, params *V2GetCredentialsParams) (*V2GetCredentialsOK, error) {
@@ -785,6 +936,31 @@ func (a *Client) V2UpdateCluster(ctx context.Context, params *V2UpdateClusterPar
 		return nil, err
 	}
 	return result.(*V2UpdateClusterCreated), nil
+
+}
+
+/*
+V2UpdateClusterUISettings Update cluster specific UI settings.
+*/
+func (a *Client) V2UpdateClusterUISettings(ctx context.Context, params *V2UpdateClusterUISettingsParams) (*V2UpdateClusterUISettingsOK, error) {
+
+	result, err := a.transport.Submit(&runtime.ClientOperation{
+		ID:                 "V2UpdateClusterUISettings",
+		Method:             "PUT",
+		PathPattern:        "/v2/clusters/{cluster_id}/ui-settings",
+		ProducesMediaTypes: []string{"application/json"},
+		ConsumesMediaTypes: []string{"application/json"},
+		Schemes:            []string{"http", "https"},
+		Params:             params,
+		Reader:             &V2UpdateClusterUISettingsReader{formats: a.formats},
+		AuthInfo:           a.authInfo,
+		Context:            ctx,
+		Client:             params.HTTPClient,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result.(*V2UpdateClusterUISettingsOK), nil
 
 }
 
@@ -1039,6 +1215,31 @@ func (a *Client) V2GetHostIgnition(ctx context.Context, params *V2GetHostIgnitio
 }
 
 /*
+V2GetIgnoredValidations Fetch the validations which are to be ignored for this cluster.
+*/
+func (a *Client) V2GetIgnoredValidations(ctx context.Context, params *V2GetIgnoredValidationsParams) (*V2GetIgnoredValidationsOK, error) {
+
+	result, err := a.transport.Submit(&runtime.ClientOperation{
+		ID:                 "v2GetIgnoredValidations",
+		Method:             "GET",
+		PathPattern:        "/v2/clusters/{cluster_id}/ignored-validations",
+		ProducesMediaTypes: []string{"application/json"},
+		ConsumesMediaTypes: []string{"application/json"},
+		Schemes:            []string{"http", "https"},
+		Params:             params,
+		Reader:             &V2GetIgnoredValidationsReader{formats: a.formats},
+		AuthInfo:           a.authInfo,
+		Context:            ctx,
+		Client:             params.HTTPClient,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result.(*V2GetIgnoredValidationsOK), nil
+
+}
+
+/*
 V2GetNextSteps Retrieves the next operations that the host agent needs to perform.
 */
 func (a *Client) V2GetNextSteps(ctx context.Context, params *V2GetNextStepsParams) (*V2GetNextStepsOK, error) {
@@ -1089,7 +1290,7 @@ func (a *Client) V2GetPreflightRequirements(ctx context.Context, params *V2GetPr
 }
 
 /*
-V2ImportCluster Import an AI cluster using minimal data assosiated with existing OCP cluster, in order to allow adding day2 hosts to that cluster
+V2ImportCluster Import an AI cluster using minimal data associated with existing OCP cluster, in order to allow adding day2 hosts to that cluster
 */
 func (a *Client) V2ImportCluster(ctx context.Context, params *V2ImportClusterParams) (*V2ImportClusterCreated, error) {
 
@@ -1189,31 +1390,6 @@ func (a *Client) V2ListClusters(ctx context.Context, params *V2ListClustersParam
 }
 
 /*
-V2ListFeatureSupportLevels Retrieves the support levels for features for each OpenShift version.
-*/
-func (a *Client) V2ListFeatureSupportLevels(ctx context.Context, params *V2ListFeatureSupportLevelsParams) (*V2ListFeatureSupportLevelsOK, error) {
-
-	result, err := a.transport.Submit(&runtime.ClientOperation{
-		ID:                 "v2ListFeatureSupportLevels",
-		Method:             "GET",
-		PathPattern:        "/v2/feature-support-levels",
-		ProducesMediaTypes: []string{"application/json"},
-		ConsumesMediaTypes: []string{"application/json"},
-		Schemes:            []string{"http", "https"},
-		Params:             params,
-		Reader:             &V2ListFeatureSupportLevelsReader{formats: a.formats},
-		AuthInfo:           a.authInfo,
-		Context:            ctx,
-		Client:             params.HTTPClient,
-	})
-	if err != nil {
-		return nil, err
-	}
-	return result.(*V2ListFeatureSupportLevelsOK), nil
-
-}
-
-/*
 V2ListHosts Retrieves the list of OpenShift hosts that belong the infra-env.
 */
 func (a *Client) V2ListHosts(ctx context.Context, params *V2ListHostsParams) (*V2ListHostsOK, error) {
@@ -1285,6 +1461,31 @@ func (a *Client) V2RegisterCluster(ctx context.Context, params *V2RegisterCluste
 		return nil, err
 	}
 	return result.(*V2RegisterClusterCreated), nil
+
+}
+
+/*
+V2RegisterDisconnectedCluster Create a disconnected OpenShift cluster for offline installation with embedded ignition
+*/
+func (a *Client) V2RegisterDisconnectedCluster(ctx context.Context, params *V2RegisterDisconnectedClusterParams) (*V2RegisterDisconnectedClusterCreated, error) {
+
+	result, err := a.transport.Submit(&runtime.ClientOperation{
+		ID:                 "v2RegisterDisconnectedCluster",
+		Method:             "POST",
+		PathPattern:        "/v2/clusters/disconnected",
+		ProducesMediaTypes: []string{"application/json"},
+		ConsumesMediaTypes: []string{"application/json"},
+		Schemes:            []string{"http", "https"},
+		Params:             params,
+		Reader:             &V2RegisterDisconnectedClusterReader{formats: a.formats},
+		AuthInfo:           a.authInfo,
+		Context:            ctx,
+		Client:             params.HTTPClient,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result.(*V2RegisterDisconnectedClusterCreated), nil
 
 }
 
@@ -1387,6 +1588,56 @@ func (a *Client) V2ResetHostValidation(ctx context.Context, params *V2ResetHostV
 		return nil, err
 	}
 	return result.(*V2ResetHostValidationOK), nil
+
+}
+
+/*
+V2SetIgnoredValidations Register the validations which are to be ignored for this cluster.
+*/
+func (a *Client) V2SetIgnoredValidations(ctx context.Context, params *V2SetIgnoredValidationsParams) (*V2SetIgnoredValidationsCreated, error) {
+
+	result, err := a.transport.Submit(&runtime.ClientOperation{
+		ID:                 "v2SetIgnoredValidations",
+		Method:             "PUT",
+		PathPattern:        "/v2/clusters/{cluster_id}/ignored-validations",
+		ProducesMediaTypes: []string{"application/json"},
+		ConsumesMediaTypes: []string{"application/json"},
+		Schemes:            []string{"http", "https"},
+		Params:             params,
+		Reader:             &V2SetIgnoredValidationsReader{formats: a.formats},
+		AuthInfo:           a.authInfo,
+		Context:            ctx,
+		Client:             params.HTTPClient,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result.(*V2SetIgnoredValidationsCreated), nil
+
+}
+
+/*
+V2UpdateClusterFinalizingProgress Update installation finalizing progress.
+*/
+func (a *Client) V2UpdateClusterFinalizingProgress(ctx context.Context, params *V2UpdateClusterFinalizingProgressParams) (*V2UpdateClusterFinalizingProgressOK, error) {
+
+	result, err := a.transport.Submit(&runtime.ClientOperation{
+		ID:                 "v2UpdateClusterFinalizingProgress",
+		Method:             "PUT",
+		PathPattern:        "/v2/clusters/{cluster_id}/progress",
+		ProducesMediaTypes: []string{"application/json"},
+		ConsumesMediaTypes: []string{"application/json"},
+		Schemes:            []string{"http", "https"},
+		Params:             params,
+		Reader:             &V2UpdateClusterFinalizingProgressReader{formats: a.formats},
+		AuthInfo:           a.authInfo,
+		Context:            ctx,
+		Client:             params.HTTPClient,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result.(*V2UpdateClusterFinalizingProgressOK), nil
 
 }
 

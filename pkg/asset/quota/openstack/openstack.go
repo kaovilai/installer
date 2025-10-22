@@ -1,23 +1,20 @@
 package openstack
 
 import (
-	"github.com/gophercloud/gophercloud/openstack/compute/v2/flavors"
+	"github.com/gophercloud/gophercloud/v2/openstack/compute/v2/flavors"
 	"github.com/sirupsen/logrus"
 
 	machinev1alpha1 "github.com/openshift/api/machine/v1alpha1"
 	machineapi "github.com/openshift/api/machine/v1beta1"
-	operv1 "github.com/openshift/api/operator/v1"
 	"github.com/openshift/installer/pkg/asset/installconfig/openstack/validation"
 	"github.com/openshift/installer/pkg/quota"
 )
 
 // These numbers should reflect what is documented here:
 // https://github.com/openshift/installer/tree/master/docs/user/openstack
-// https://github.com/openshift/installer/blob/master/docs/user/openstack/kuryr.md
 // Number of ports, routers, subnets and routers here don't include the constraints needed
 // for each machine, which are calculated later
 var minNetworkConstraint = buildNetworkConstraint(4, 0, 0, 0, 2, 56)
-var minNetworkConstraintWithKuryr = buildNetworkConstraint(1490, 0, 249, 249, 249, 996)
 
 func buildNetworkConstraint(ports, routers, subnets, networks, securityGroups, securityGroupRules int64) []quota.Constraint {
 	return []quota.Constraint{
@@ -30,35 +27,39 @@ func buildNetworkConstraint(ports, routers, subnets, networks, securityGroups, s
 	}
 }
 
-func getNetworkConstraints(networkType string) []quota.Constraint {
-	if networkType == string(operv1.NetworkTypeKuryr) {
-		return minNetworkConstraintWithKuryr
-	}
+func getNetworkConstraints() []quota.Constraint {
 	return minNetworkConstraint
 }
 
 // Constraints returns a list of quota constraints based on the InstallConfig.
 // These constraints can be used to check if there is enough quota for creating a cluster
 // for the install config.
-func Constraints(ci *validation.CloudInfo, controlPlanes []machineapi.Machine, computes []machineapi.MachineSet, networkType string) []quota.Constraint {
+func Constraints(ci *validation.CloudInfo, controlPlanes []machineapi.Machine, computes []machineapi.MachineSet) []quota.Constraint {
 	var constraints []quota.Constraint
 
 	for i := 0; i < len(controlPlanes); i++ {
-		constraints = append(constraints, machineConstraints(ci, &controlPlanes[i], networkType)...)
+		constraints = append(constraints, machineConstraints(ci, &controlPlanes[i])...)
 	}
 	constraints = append(constraints, instanceConstraint(int64(len(controlPlanes))))
 
 	for i := 0; i < len(computes); i++ {
-		constraints = append(constraints, machineSetConstraints(ci, &computes[i], networkType)...)
+		constraints = append(constraints, machineSetConstraints(ci, &computes[i])...)
 	}
 	constraints = append(constraints, instanceConstraint(int64(len(computes))))
-	constraints = append(constraints, getNetworkConstraints(networkType)...)
+	constraints = append(constraints, getNetworkConstraints()...)
 
 	// If the cluster is using pre-provisioned networks, then the quota constraints should be
 	// null because the installer doesn't need to create any resources.
-	if ci.MachinesSubnet == nil {
+	if len(ci.ControlPlanePortSubnets) == 0 {
 		constraints = append(constraints, networkConstraint(1), routerConstraint(1), subnetConstraint(1))
 	}
+	// if the cluster does not have worker nodes then reduce the server group value from 2 to 1
+	numServerGroups := int64(2)
+	if len(computes) == 0 {
+		numServerGroups--
+	}
+	constraints = append(constraints, serverGroupsConstraint(numServerGroups))
+	constraints = append(constraints, serverGroupMembersConstraint(int64(len(controlPlanes)+len(computes))))
 
 	return aggregate(constraints)
 }
@@ -72,7 +73,7 @@ func getOpenstackProviderSpec(spec *machineapi.ProviderSpec) *machinev1alpha1.Op
 	return spec.Value.Object.(*machinev1alpha1.OpenstackProviderSpec)
 }
 
-func machineConstraints(ci *validation.CloudInfo, machine *machineapi.Machine, networkType string) []quota.Constraint {
+func machineConstraints(ci *validation.CloudInfo, machine *machineapi.Machine) []quota.Constraint {
 	osps := getOpenstackProviderSpec(&machine.Spec.ProviderSpec)
 	if osps == nil {
 		logrus.Warnf("Skipping quota validation for Machine %s: Invalid ProviderSpec", machine.Name)
@@ -90,7 +91,7 @@ func machineConstraints(ci *validation.CloudInfo, machine *machineapi.Machine, n
 	return []quota.Constraint{machineFlavorCoresToQuota(&flavor), machineFlavorRAMToQuota(&flavor), portConstraint(int64(len(osps.Networks)))}
 }
 
-func machineSetConstraints(ci *validation.CloudInfo, ms *machineapi.MachineSet, networkType string) []quota.Constraint {
+func machineSetConstraints(ci *validation.CloudInfo, ms *machineapi.MachineSet) []quota.Constraint {
 	osps := getOpenstackProviderSpec(&ms.Spec.Template.Spec.ProviderSpec)
 	if osps == nil {
 		logrus.Warnf("Skipping quota validation for MachineSet %s: Invalid ProviderSpec", ms.Name)
@@ -145,6 +146,14 @@ func machineFlavorRAMToQuota(f *flavors.Flavor) quota.Constraint {
 
 func instanceConstraint(count int64) quota.Constraint {
 	return generateConstraint("Instances", count)
+}
+
+func serverGroupsConstraint(count int64) quota.Constraint {
+	return generateConstraint("ServerGroups", count)
+}
+
+func serverGroupMembersConstraint(count int64) quota.Constraint {
+	return generateConstraint("ServerGroupMembers", count)
 }
 
 func portConstraint(count int64) quota.Constraint {

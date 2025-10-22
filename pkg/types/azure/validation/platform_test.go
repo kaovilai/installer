@@ -28,6 +28,18 @@ func validNetworkPlatform() *azure.Platform {
 	return p
 }
 
+func validCustomerManagedKeys() *azure.Platform {
+	p := validPlatform()
+	p.CustomerManagedKey = &azure.CustomerManagedKey{
+		KeyVault: azure.KeyVault{
+			KeyName:       "test",
+			Name:          "test",
+			ResourceGroup: "test123",
+		},
+		UserAssignedIdentityKey: "12345678-1234-1234-1234-123456789123"}
+	return p
+}
+
 func TestValidatePlatform(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -46,30 +58,12 @@ func TestValidatePlatform(t *testing.T) {
 		},
 		{
 			name: "invalid baseDomainResourceGroupName",
-			wantSkip: func(p *azure.Platform) bool {
-				// This test case doesn't apply to ARO
-				// so we want to skip it when run tests for ARO build
-				return p.IsARO()
-			},
 			platform: func() *azure.Platform {
 				p := validPlatform()
 				p.BaseDomainResourceGroupName = ""
 				return p
 			}(),
 			expected: `^test-path\.baseDomainResourceGroupName: Required value: baseDomainResourceGroupName is the resource group name where the azure dns zone is deployed$`,
-		},
-		{
-			name: "do not require baseDomainResourceGroupName on ARO",
-			wantSkip: func(p *azure.Platform) bool {
-				// This is a ARO-specific test case
-				// so want to skip when running non-ARO builds
-				return !p.IsARO()
-			},
-			platform: func() *azure.Platform {
-				p := validPlatform()
-				p.BaseDomainResourceGroupName = ""
-				return p
-			}(),
 		},
 		{
 			name:     "minimal",
@@ -140,7 +134,7 @@ func TestValidatePlatform(t *testing.T) {
 				p.OutboundType = "random-egress"
 				return p
 			}(),
-			expected: `^test-path\.outboundType: Unsupported value: "random-egress": supported values: "Loadbalancer", "UserDefinedRouting"$`,
+			expected: `^test-path\.outboundType: Unsupported value: "random-egress": supported values: "Loadbalancer", "NATGatewaySingleZone", "UserDefinedRouting"$`,
 		},
 		{
 			name: "invalid user defined type",
@@ -151,14 +145,87 @@ func TestValidatePlatform(t *testing.T) {
 			}(),
 			expected: `^test-path\.outboundType: Invalid value: "UserDefinedRouting": UserDefinedRouting is only allowed when installing to pre-existing network$`,
 		},
+		{
+			name: "missing key vault name",
+			platform: func() *azure.Platform {
+				p := validCustomerManagedKeys()
+				p.CustomerManagedKey.KeyVault.Name = ""
+				return p
+			}(),
+			expected: `^test-path\.customerManagedKey: Required value: name of the key vault is required for storage account encryption$`,
+		},
+		{
+			name: "invalid key vault name",
+			platform: func() *azure.Platform {
+				p := validCustomerManagedKeys()
+				p.CustomerManagedKey.KeyVault.Name = "1invalid"
+				return p
+			}(),
+			expected: `^test-path\.customerManagedKey: Invalid value: "1invalid": invalid name for key vault for encryption$`,
+		},
+		{
+			name: "missing key vault key name",
+			platform: func() *azure.Platform {
+				p := validCustomerManagedKeys()
+				p.CustomerManagedKey.KeyVault.KeyName = ""
+				return p
+			}(),
+			expected: `^test-path\.customerManagedKey: Required value: key vault key name is required for storage account encryption$`,
+		},
+		{
+			name: "invalid key vault key name",
+			platform: func() *azure.Platform {
+				p := validCustomerManagedKeys()
+				p.CustomerManagedKey.KeyVault.KeyName = "."
+				return p
+			}(),
+			expected: `^test-path\.customerManagedKey: Invalid value: ".": invalid key name for encryption$`,
+		},
+		{
+			name: "missing resource group",
+			platform: func() *azure.Platform {
+				p := validCustomerManagedKeys()
+				p.CustomerManagedKey.KeyVault.ResourceGroup = ""
+				return p
+			}(),
+			expected: `^test-path\.customerManagedKey: Required value: resource group of the key vault is required for storage account encryption$`,
+		},
+		{
+			name: "invalid resource group",
+			platform: func() *azure.Platform {
+				p := validCustomerManagedKeys()
+				p.CustomerManagedKey.KeyVault.ResourceGroup = "invalid."
+				return p
+			}(),
+			expected: `^test-path\.customerManagedKey: Invalid value: "invalid.": invalid resource group for encryption$`,
+		},
+		{
+			name: "missing user assigned identity",
+			platform: func() *azure.Platform {
+				p := validCustomerManagedKeys()
+				p.CustomerManagedKey.UserAssignedIdentityKey = ""
+				return p
+			}(),
+			expected: `^test-path\.customerManagedKey: Required value: user assigned identity key is required for storage account encryption$`,
+		},
+		{
+			name: "invalid user assigned identity",
+			platform: func() *azure.Platform {
+				p := validCustomerManagedKeys()
+				p.CustomerManagedKey.UserAssignedIdentityKey = "-"
+				return p
+			}(),
+			expected: `^test-path\.customerManagedKey: Invalid value: "-": invalid user assigned identity key for encryption$`,
+		},
 	}
+	ic := types.InstallConfig{}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.wantSkip != nil && tc.wantSkip(tc.platform) {
 				t.Skip()
 			}
 
-			err := ValidatePlatform(tc.platform, types.ExternalPublishingStrategy, field.NewPath("test-path")).ToAggregate()
+			err := ValidatePlatform(tc.platform, types.ExternalPublishingStrategy, field.NewPath("test-path"), &ic).ToAggregate()
 			if tc.expected == "" {
 				assert.NoError(t, err)
 			} else {

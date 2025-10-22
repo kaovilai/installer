@@ -1,30 +1,41 @@
 # This Dockerfile is a used by CI to publish an installer image
 # It builds an image containing openshift-install.
 
-ARG libvirt_version="8.0.0"
+# The binaries in these images are dynamically linked
+FROM registry.ci.openshift.org/ocp/4.21:etcd AS etcd
+FROM registry.ci.openshift.org/ocp/4.21:hyperkube AS kas
 
-FROM registry.ci.openshift.org/ocp/builder:rhel-8-golang-1.19-openshift-4.14 AS builder
-ARG libvirt_version
-ARG TAGS="libvirt baremetal"
-RUN dnf install -y libvirt-devel-$libvirt_version && \
-    dnf clean all && rm -rf /var/cache/yum/*
+FROM registry.ci.openshift.org/ocp/builder:rhel-9-golang-1.24-openshift-4.21 AS builder
+ARG TAGS="baremetal fipscapable"
+ARG SKIP_ENVTEST="y"
 WORKDIR /go/src/github.com/openshift/installer
 COPY . .
+COPY --from=etcd /usr/bin/etcd /usr/bin/etcd
+COPY --from=kas /usr/bin/kube-apiserver /usr/bin/kube-apiserver
+RUN mkdir -p cluster-api/bin/$(go env GOOS)_$(go env GOHOSTARCH) && \
+	mv /usr/bin/etcd /usr/bin/kube-apiserver -t cluster-api/bin/$(go env GOOS)_$(go env GOHOSTARCH)/
 RUN DEFAULT_ARCH="$(go env GOHOSTARCH)" hack/build.sh
+RUN DEFAULT_ARCH="$(go env GOHOSTARCH)" hack/build-node-joiner.sh
 
+FROM registry.ci.openshift.org/ocp/4.21:base-rhel9
 
-FROM registry.ci.openshift.org/ocp/4.14:base
-ARG libvirt_version
+COPY --from=builder /go/src/github.com/openshift/installer/images/baremetal/manifests /manifests
 COPY --from=builder /go/src/github.com/openshift/installer/bin/openshift-install /bin/openshift-install
 
 RUN dnf upgrade -y && \
     dnf install --setopt=tsflags=nodocs -y \
-    libvirt-libs-$libvirt_version openssl unzip jq openssh-clients && \
+    openssl unzip jq openssh-clients && \
+    dnf clean all && rm -rf /var/cache/yum/*
+
+# node-joiner requirements
+COPY --from=builder /go/src/github.com/openshift/installer/bin/node-joiner /bin/node-joiner
+RUN dnf install -y nmstate openshift-clients && \
     dnf clean all && rm -rf /var/cache/yum/*
 
 RUN mkdir /output && chown 1000:1000 /output
 USER 1000:1000
-ENV PATH /bin
 ENV HOME /output
 WORKDIR /output
+# We're not really an operator, we're just getting some data into the release image.
+LABEL io.openshift.release.operator=true
 ENTRYPOINT ["/bin/openshift-install"]

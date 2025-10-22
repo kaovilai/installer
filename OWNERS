@@ -3,7 +3,9 @@
 
 approvers:
   - installer-team
+  - splat-team
   - sdodson
+  - zaneb
 reviewers:
   - installer-team
 component: Installer

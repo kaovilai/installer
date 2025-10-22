@@ -24,8 +24,12 @@ type Config struct {
 	// +optional
 	AdditionalNTPSources []string `json:"additionalNTPSources,omitempty"`
 	// ip address of node0
-	RendezvousIP string `json:"rendezvousIP,omitempty"`
-	Hosts        []Host `json:"hosts,omitempty"`
+	RendezvousIP         string `json:"rendezvousIP,omitempty"`
+	BootArtifactsBaseURL string `json:"bootArtifactsBaseURL,omitempty"`
+	Hosts                []Host `json:"hosts,omitempty"`
+	// When MinimalISO is set to true, a minimal ISO that does not contain the rootfs will be generated.
+	// By default a full ISO will be created, unless the platform is External, which generates a minimal ISO.
+	MinimalISO bool `json:"minimalISO,omitempty"`
 }
 
 // Host defines per host configurations
@@ -36,4 +40,5 @@ type Host struct {
 	// list of interfaces and mac addresses
 	Interfaces    []*aiv1beta1.Interface `json:"interfaces,omitempty"`
 	NetworkConfig aiv1beta1.NetConfig    `json:"networkConfig,omitempty"`
+	BMC           baremetal.BMC
 }

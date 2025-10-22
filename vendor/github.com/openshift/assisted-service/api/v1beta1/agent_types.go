@@ -89,6 +89,9 @@ const (
 	UnbindingMsg                     string                     = "The agent is currently unbinding from a cluster deployment"
 	UnbindingPendingUserActionReason string                     = "UnbindingPendingUserAction"
 	UnbindingPendingUserActionMsg    string                     = "The agent is currently unbinding; Pending host reboot from infraenv image"
+
+	CleanupCondition    conditionsv1.ConditionType = "Cleanup"
+	CleanupFailedReason string                     = "CleanupFailed"
 )
 
 type HostMemory struct {
@@ -152,6 +155,7 @@ type HostDisk struct {
 type HostBoot struct {
 	CurrentBootMode string `json:"currentBootMode,omitempty"`
 	PxeInterface    string `json:"pxeInterface,omitempty"`
+	DeviceType      string `json:"deviceType,omitempty"`
 }
 
 type HostSystemVendor struct {
@@ -191,6 +195,10 @@ type AgentSpec struct {
 	IgnitionConfigOverrides string `json:"ignitionConfigOverrides,omitempty"`
 	// IgnitionEndpointTokenReference references a secret containing an Authorization Bearer token to fetch the ignition from ignition_endpoint_url.
 	IgnitionEndpointTokenReference *IgnitionEndpointTokenReference `json:"ignitionEndpointTokenReference,omitempty"`
+	// IgnitionEndpointHTTPHeaders are the additional HTTP headers used when fetching the ignition.
+	IgnitionEndpointHTTPHeaders map[string]string `json:"ignitionEndpointHTTPHeaders,omitempty"`
+	// NodeLabels are the labels to be applied on the node associated with this agent
+	NodeLabels map[string]string `json:"nodeLabels,omitempty"`
 }
 
 type IgnitionEndpointTokenReference struct {
@@ -220,6 +228,13 @@ type HostNTPSources struct {
 	SourceState models.SourceState `json:"sourceState,omitempty"`
 }
 
+type AgentDeprovisionInfo struct {
+	ClusterName      string `json:"cluster_name,omitempty"`
+	ClusterNamespace string `json:"cluster_namespace,omitempty"`
+	NodeName         string `json:"node_name,omitempty"`
+	Message          string `json:"message,omitempty"`
+}
+
 // AgentStatus defines the observed state of Agent
 type AgentStatus struct {
 	Bootstrap bool `json:"bootstrap,omitempty"`
@@ -236,6 +251,23 @@ type AgentStatus struct {
 	// ValidationsInfo is a JSON-formatted string containing the validation results for each validation id grouped by category (network, hosts-data, etc.)
 	// +optional
 	ValidationsInfo common.ValidationsStatus `json:"validationsInfo,omitempty"`
+
+	// InstallationDiskID is the disk that will be used for the installation.
+	// +optional
+	InstallationDiskID string `json:"installation_disk_id,omitempty"`
+
+	// DeprovisionInfo stores data related to the agent's previous cluster binding in order to clean up when the agent re-registers
+	// +optional
+	DeprovisionInfo *AgentDeprovisionInfo `json:"deprovision_info,omitempty"`
+
+	// CSRStatus tracks the status of CSR approvals for the agent
+	CSRStatus CSRStatus `json:"csrStatus,omitempty"`
+
+	// Kind corresponds to the same field in the model Host. It indicates the type of cluster the host is
+	// being installed to; either an existing cluster (day-2) or a new cluster (day-1).
+	// Value is one of: "AddToExistingClusterHost" (day-2) or "Host" (day-1)
+	// +optional
+	Kind string `json:"kind,omitempty"`
 }
 
 type DebugInfo struct {
@@ -251,6 +283,30 @@ type DebugInfo struct {
 	//Additional information pertaining to the status of the Agent
 	// +optional
 	StateInfo string `json:"stateInfo,omitempty"`
+}
+
+// CSRType represents the type of CSR
+type CSRType string
+
+const (
+	CSRTypeClient  CSRType = "client"
+	CSRTypeServing CSRType = "serving"
+)
+
+// CSRInfo tracks information about an approved CSR
+type CSRInfo struct {
+	Name       string      `json:"name"`
+	Type       CSRType     `json:"type"`
+	ApprovedAt metav1.Time `json:"approvedAt"`
+}
+
+// CSRStatus tracks the status of CSR approvals for the agent
+type CSRStatus struct {
+	// CSRs that have been approved for the agent by the assisted-service
+	ApprovedCSRs []CSRInfo `json:"approvedCSRs,omitempty"`
+
+	// Last time we attempted a CSR approval
+	LastApprovalAttempt metav1.Time `json:"lastApprovalAttempt,omitempty"`
 }
 
 // +kubebuilder:object:root=true

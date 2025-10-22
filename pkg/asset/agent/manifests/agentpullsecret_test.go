@@ -1,23 +1,25 @@
 package manifests
 
 import (
+	"context"
 	"os"
 	"testing"
 
-	"github.com/golang/mock/gomock"
 	"github.com/pkg/errors"
 	"github.com/stretchr/testify/assert"
+	"go.uber.org/mock/gomock"
 	corev1 "k8s.io/api/core/v1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/yaml"
 
 	"github.com/openshift/installer/pkg/asset"
 	"github.com/openshift/installer/pkg/asset/agent"
+	"github.com/openshift/installer/pkg/asset/agent/joiner"
+	"github.com/openshift/installer/pkg/asset/agent/workflow"
 	"github.com/openshift/installer/pkg/asset/mock"
 )
 
 func TestAgentPullSecret_Generate(t *testing.T) {
-
 	cases := []struct {
 		name           string
 		dependencies   []asset.Asset
@@ -25,16 +27,15 @@ func TestAgentPullSecret_Generate(t *testing.T) {
 		expectedConfig *corev1.Secret
 	}{
 		{
-			name: "missing install config",
+			name: "retrieved from cluster",
 			dependencies: []asset.Asset{
 				&agent.OptionalInstallConfig{},
-			},
-			expectedError: "missing configuration or manifest file",
-		},
-		{
-			name: "valid configuration",
-			dependencies: []asset.Asset{
-				getValidOptionalInstallConfig(),
+				&workflow.AgentWorkflow{Workflow: workflow.AgentWorkflowTypeAddNodes},
+				&joiner.ClusterInfo{
+					ClusterName: "ostest",
+					Namespace:   "cluster0",
+					PullSecret:  "{\n  \"auths\": {\n    \"cloud.openshift.com\": {\n      \"auth\": \"b3BlUTA=\",\n      \"email\": \"test@redhat.com\"\n    }\n  }\n}",
+				},
 			},
 			expectedConfig: &corev1.Secret{
 				TypeMeta: v1.TypeMeta{
@@ -42,8 +43,34 @@ func TestAgentPullSecret_Generate(t *testing.T) {
 					APIVersion: "v1",
 				},
 				ObjectMeta: v1.ObjectMeta{
-					Name:      getPullSecretName(getValidOptionalInstallConfig()),
-					Namespace: getObjectMetaNamespace(getValidOptionalInstallConfig()),
+					Name:      "ostest-pull-secret",
+					Namespace: "cluster0",
+				},
+				StringData: map[string]string{
+					".dockerconfigjson": "{\n  \"auths\": {\n    \"cloud.openshift.com\": {\n      \"auth\": \"b3BlUTA=\",\n      \"email\": \"test@redhat.com\"\n    }\n  }\n}",
+				},
+			},
+		},
+		{
+			name: "missing install config",
+			dependencies: []asset.Asset{
+				&agent.OptionalInstallConfig{}, &workflow.AgentWorkflow{Workflow: workflow.AgentWorkflowTypeInstall}, &joiner.ClusterInfo{},
+			},
+			expectedError: "missing configuration or manifest file",
+		},
+		{
+			name: "valid configuration",
+			dependencies: []asset.Asset{
+				getValidOptionalInstallConfig(), &workflow.AgentWorkflow{Workflow: workflow.AgentWorkflowTypeInstall}, &joiner.ClusterInfo{},
+			},
+			expectedConfig: &corev1.Secret{
+				TypeMeta: v1.TypeMeta{
+					Kind:       "Secret",
+					APIVersion: "v1",
+				},
+				ObjectMeta: v1.ObjectMeta{
+					Name:      getPullSecretName(getValidOptionalInstallConfig().ClusterName()),
+					Namespace: getValidOptionalInstallConfig().ClusterNamespace(),
 				},
 				StringData: map[string]string{
 					".dockerconfigjson": "{\n  \"auths\": {\n    \"cloud.openshift.com\": {\n      \"auth\": \"b3BlUTA=\",\n      \"email\": \"test@redhat.com\"\n    }\n  }\n}",
@@ -58,7 +85,7 @@ func TestAgentPullSecret_Generate(t *testing.T) {
 			parents.Add(tc.dependencies...)
 
 			asset := &AgentPullSecret{}
-			err := asset.Generate(parents)
+			err := asset.Generate(context.Background(), parents)
 
 			if tc.expectedError != "" {
 				assert.Equal(t, tc.expectedError, err.Error())
@@ -122,7 +149,7 @@ stringData:
 		{
 			name:          "empty",
 			data:          "",
-			expectedError: "invalid PullSecret configuration: StringData: Required value: the pull secret is empty",
+			expectedError: "invalid PullSecret configuration: stringData: Required value: the pull secret is empty",
 		},
 		{
 			name: "missing-string-data",
@@ -132,7 +159,7 @@ kind: Secret
 metadata:
   name: pull-secret
   namespace: cluster-0`,
-			expectedError: "invalid PullSecret configuration: StringData: Required value: the pull secret is empty",
+			expectedError: "invalid PullSecret configuration: stringData: Required value: the pull secret is empty",
 		},
 		{
 			name: "missing-secret-key",
@@ -144,7 +171,7 @@ metadata:
   namespace: cluster-0
 stringData:
   .dockerconfigjson:`,
-			expectedError: "invalid PullSecret configuration: StringData: Required value: the pull secret does not contain any data",
+			expectedError: "invalid PullSecret configuration: stringData: Required value: the pull secret does not contain any data",
 		},
 		{
 			name: "bad-secret-format",
@@ -156,7 +183,7 @@ metadata:
   namespace: cluster-0
 stringData:
   .dockerconfigjson: 'foo'`,
-			expectedError: "invalid PullSecret configuration: StringData: Invalid value: \"foo\": invalid character 'o' in literal false (expecting 'a')",
+			expectedError: "invalid PullSecret configuration: stringData: Invalid value: \"foo\": invalid character 'o' in literal false (expecting 'a')",
 		},
 		{
 			name:       "file-not-found",

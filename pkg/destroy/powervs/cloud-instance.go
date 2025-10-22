@@ -2,13 +2,14 @@ package powervs
 
 import (
 	"context"
+	"fmt"
 	"math"
+	gohttp "net/http"
 	"strings"
 	"time"
 
 	"github.com/IBM/go-sdk-core/v5/core"
 	"github.com/IBM/vpc-go-sdk/vpcv1"
-	"github.com/pkg/errors"
 	"k8s.io/apimachinery/pkg/util/wait"
 )
 
@@ -16,60 +17,137 @@ const (
 	cloudInstanceTypeName = "cloudInstance"
 )
 
-// listCloudInstances lists instances in the cloud server.
+// listCloudInstances lists VM instances matching either name or tag in the IBM Cloud.
 func (o *ClusterUninstaller) listCloudInstances() (cloudResources, error) {
-	o.Logger.Debugf("Listing virtual Cloud service instances")
+	var (
+		instanceIDs []string
+		instanceID  string
+		ctx         context.Context
+		cancel      context.CancelFunc
+		result      = make([]cloudResource, 0, 1)
+		options     *vpcv1.GetInstanceOptions
+		instance    *vpcv1.Instance
+		response    *core.DetailedResponse
+		err         error
+	)
 
-	ctx, cancel := o.contextWithTimeout()
-	defer cancel()
-
-	options := o.vpcSvc.NewListInstancesOptions()
-
-	// https://raw.githubusercontent.com/IBM/vpc-go-sdk/master/vpcv1/vpc_v1.go
-	resources, _, err := o.vpcSvc.ListInstancesWithContext(ctx, options)
+	if o.searchByTag {
+		// Should we list by tag matching?
+		instanceIDs, err = o.listByTag(TagTypeCloudInstance)
+	} else {
+		// Otherwise list will list by name matching.
+		instanceIDs, err = o.listCloudInstancesByName()
+	}
 	if err != nil {
-		o.Logger.Warnf("Error o.vpcSvc.ListInstancesWithContext: %v", err)
 		return nil, err
 	}
 
-	var foundOne = false
+	ctx, cancel = contextWithTimeout()
+	defer cancel()
 
-	result := []cloudResource{}
-	for _, instance := range resources.Instances {
+	for _, instanceID = range instanceIDs {
+		select {
+		case <-ctx.Done():
+			o.Logger.Debugf("listCloudInstances: case <-ctx.Done()")
+			return nil, ctx.Err() // we're cancelled, abort
+		default:
+		}
+
+		options = o.vpcSvc.NewGetInstanceOptions(instanceID)
+
+		instance, response, err = o.vpcSvc.GetInstanceWithContext(ctx, options)
+		if err != nil && response != nil && response.StatusCode == gohttp.StatusNotFound {
+			// The vpc could have been deleted just after a list was created.
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("failed to get instance (%s): err = %w, response = %v", instanceID, err, response)
+		}
+
+		result = append(result, cloudResource{
+			key:      *instance.ID,
+			name:     *instance.Name,
+			status:   *instance.Status,
+			typeName: cloudInstanceTypeName,
+			id:       *instance.ID,
+		})
+	}
+
+	return cloudResources{}.insert(result...), nil
+}
+
+// listCloudInstances lists VM instances matching by name in the IBM Cloud.
+func (o *ClusterUninstaller) listCloudInstancesByName() ([]string, error) {
+	var (
+		ctx                context.Context
+		cancel             context.CancelFunc
+		options            *vpcv1.ListInstancesOptions
+		instanceCollection *vpcv1.InstanceCollection
+		response           *core.DetailedResponse
+		foundOne           = false
+		result             = make([]string, 0, 3)
+		instance           vpcv1.Instance
+		err                error
+	)
+
+	o.Logger.Debugf("Listing virtual Cloud service instances by NAME")
+
+	ctx, cancel = contextWithTimeout()
+	defer cancel()
+
+	select {
+	case <-ctx.Done():
+		o.Logger.Debugf("listCloudInstancesByName: case <-ctx.Done()")
+		return nil, ctx.Err() // we're cancelled, abort
+	default:
+	}
+
+	options = o.vpcSvc.NewListInstancesOptions()
+	options.SetResourceGroupID(o.resourceGroupID)
+
+	// https://raw.githubusercontent.com/IBM/vpc-go-sdk/master/vpcv1/vpc_v1.go
+	instanceCollection, response, err = o.vpcSvc.ListInstancesWithContext(ctx, options)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list cloud instances: err = %w, response = %v", err, response)
+	}
+
+	for _, instance = range instanceCollection.Instances {
 		if strings.Contains(*instance.Name, o.InfraID) {
 			foundOne = true
 			o.Logger.Debugf("listCloudInstances: FOUND: %s, %s, %s", *instance.ID, *instance.Name, *instance.Status)
-			result = append(result, cloudResource{
-				key:      *instance.ID,
-				name:     *instance.Name,
-				status:   *instance.Status,
-				typeName: cloudInstanceTypeName,
-				id:       *instance.ID,
-			})
+			result = append(result, *instance.ID)
 		}
 	}
 	if !foundOne {
 		o.Logger.Debugf("listCloudInstances: NO matching virtual instance against: %s", o.InfraID)
-		for _, instance := range resources.Instances {
+		for _, instance = range instanceCollection.Instances {
 			o.Logger.Debugf("listCloudInstances: only found virtual instance: %s", *instance.Name)
 		}
 	}
 
-	return cloudResources{}.insert(result...), nil
+	return result, nil
 }
 
 // destroyCloudInstance deletes a given instance.
 func (o *ClusterUninstaller) destroyCloudInstance(item cloudResource) error {
 	var (
 		ctx                   context.Context
+		cancel                context.CancelFunc
 		err                   error
 		getInstanceOptions    *vpcv1.GetInstanceOptions
 		deleteInstanceOptions *vpcv1.DeleteInstanceOptions
 		response              *core.DetailedResponse
 	)
 
-	ctx, cancel := o.contextWithTimeout()
+	ctx, cancel = contextWithTimeout()
 	defer cancel()
+
+	select {
+	case <-ctx.Done():
+		o.Logger.Debugf("destroyCloudInstance: case <-ctx.Done()")
+		return ctx.Err() // we're cancelled, abort
+	default:
+	}
 
 	getInstanceOptions = o.vpcSvc.NewGetInstanceOptions(item.id)
 
@@ -110,14 +188,14 @@ func (o *ClusterUninstaller) destroyCloudInstances() error {
 
 	items := o.insertPendingItems(cloudInstanceTypeName, firstPassList.list())
 
-	ctx, cancel := o.contextWithTimeout()
+	ctx, cancel := contextWithTimeout()
 	defer cancel()
 
 	for _, item := range items {
 		select {
 		case <-ctx.Done():
 			o.Logger.Debugf("destroyCloudInstances: case <-ctx.Done()")
-			return o.Context.Err() // we're cancelled, abort
+			return ctx.Err() // we're cancelled, abort
 		default:
 		}
 
@@ -126,7 +204,7 @@ func (o *ClusterUninstaller) destroyCloudInstances() error {
 			Factor:   1.1,
 			Cap:      leftInContext(ctx),
 			Steps:    math.MaxInt32}
-		err = wait.ExponentialBackoffWithContext(ctx, backoff, func() (bool, error) {
+		err = wait.ExponentialBackoffWithContext(ctx, backoff, func(context.Context) (bool, error) {
 			err2 := o.destroyCloudInstance(item)
 			if err2 == nil {
 				return true, err2
@@ -143,7 +221,14 @@ func (o *ClusterUninstaller) destroyCloudInstances() error {
 		for _, item := range items {
 			o.Logger.Debugf("destroyCloudInstances: found %s in pending items", item.name)
 		}
-		return errors.Errorf("destroyCloudInstances: %d undeleted items pending", len(items))
+		return fmt.Errorf("destroyCloudInstances: %d undeleted items pending", len(items))
+	}
+
+	select {
+	case <-ctx.Done():
+		o.Logger.Debugf("destroyCloudInstances: case <-ctx.Done()")
+		return ctx.Err() // we're cancelled, abort
+	default:
 	}
 
 	backoff := wait.Backoff{
@@ -151,7 +236,7 @@ func (o *ClusterUninstaller) destroyCloudInstances() error {
 		Factor:   1.1,
 		Cap:      leftInContext(ctx),
 		Steps:    math.MaxInt32}
-	err = wait.ExponentialBackoffWithContext(ctx, backoff, func() (bool, error) {
+	err = wait.ExponentialBackoffWithContext(ctx, backoff, func(context.Context) (bool, error) {
 		secondPassList, err2 := o.listCloudInstances()
 		if err2 != nil {
 			return false, err2

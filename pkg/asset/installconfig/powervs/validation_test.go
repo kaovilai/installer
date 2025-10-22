@@ -5,13 +5,11 @@ import (
 	"os"
 	"testing"
 
-	"github.com/IBM-Cloud/power-go-client/power/models"
 	"github.com/IBM/vpc-go-sdk/vpcv1"
-	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
+	"go.uber.org/mock/gomock"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/util/intstr"
 
 	machinev1 "github.com/openshift/api/machine/v1"
 	machinev1beta1 "github.com/openshift/api/machine/v1beta1"
@@ -25,7 +23,7 @@ import (
 type editFunctions []func(ic *types.InstallConfig)
 
 var (
-	validRegion                  = "lon"
+	validRegion                  = "dal"
 	validCIDR                    = "192.168.0.0/24"
 	validCISInstanceCRN          = "crn:v1:bluemix:public:internet-svcs:global:a/valid-account-id:valid-instance-id::"
 	validClusterName             = "valid-cluster-name"
@@ -36,7 +34,6 @@ var (
 	validPublicSubnetUSSouth2ID  = "public-subnet-us-south-2-id"
 	validPrivateSubnetUSSouth1ID = "private-subnet-us-south-1-id"
 	validPrivateSubnetUSSouth2ID = "private-subnet-us-south-2-id"
-	validServiceInstanceID       = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 	validSubnets                 = []string{
 		validPublicSubnetUSSouth1ID,
 		validPublicSubnetUSSouth2ID,
@@ -44,7 +41,7 @@ var (
 		validPrivateSubnetUSSouth2ID,
 	}
 	validUserID = "valid-user@example.com"
-	validZone   = "lon04"
+	validZone   = "dal12"
 
 	existingDNSRecordsResponse = []powervs.DNSRecordResponse{
 		{
@@ -56,21 +53,24 @@ var (
 			Type: "valid-dns-record-type",
 		},
 	}
-	noDNSRecordsResponse = []powervs.DNSRecordResponse{}
-	invalidArchitecture  = func(ic *types.InstallConfig) { ic.ControlPlane.Architecture = "ppc64" }
-
-	validVPCRegion    = "eu-gb"
-	invalidVPCRegion  = "foo-bah"
-	setValidVPCRegion = func(ic *types.InstallConfig) { ic.Platform.PowerVS.VPCRegion = validVPCRegion }
-	validRG           = "valid-resource-group"
-	anotherValidRG    = "another-valid-resource-group"
-	validVPCID        = "valid-id"
-	anotherValidVPCID = "another-valid-id"
-	validVPC          = "valid-vpc"
-	setValidVPCName   = func(ic *types.InstallConfig) { ic.Platform.PowerVS.VPCName = validVPC }
-	anotherValidVPC   = "another-valid-vpc"
-	invalidVPC        = "bogus-vpc"
-	validVPCs         = []vpcv1.VPC{
+	noDNSRecordsResponse   = []powervs.DNSRecordResponse{}
+	invalidArchitecture    = func(ic *types.InstallConfig) { ic.ControlPlane.Architecture = "ppc64" }
+	cidrInvalid, _         = ipnet.ParseCIDR("192.168.0.0/16")
+	invalidMachinePoolCIDR = func(ic *types.InstallConfig) { ic.Networking.MachineNetwork[0].CIDR = *cidrInvalid }
+	cidrValid, _           = ipnet.ParseCIDR("192.168.0.0/24")
+	validMachinePoolCIDR   = func(ic *types.InstallConfig) { ic.Networking.MachineNetwork[0].CIDR = *cidrValid }
+	validVPCRegion         = "us-south"
+	invalidVPCRegion       = "foo-bah"
+	setValidVPCRegion      = func(ic *types.InstallConfig) { ic.Platform.PowerVS.VPCRegion = validVPCRegion }
+	validRG                = "valid-resource-group"
+	anotherValidRG         = "another-valid-resource-group"
+	validVPCID             = "valid-id"
+	anotherValidVPCID      = "another-valid-id"
+	validVPC               = "valid-vpc"
+	setValidVPCName        = func(ic *types.InstallConfig) { ic.Platform.PowerVS.VPC = validVPC }
+	anotherValidVPC        = "another-valid-vpc"
+	invalidVPC             = "bogus-vpc"
+	validVPCs              = []vpcv1.VPC{
 		{
 			Name: &validVPC,
 			ID:   &validVPCID,
@@ -113,6 +113,27 @@ var (
 			ID:   &validRG,
 		},
 	}
+	regionWithPER    = "dal10"
+	regionWithoutPER = "foo99"
+	regionPERUnknown = "bah77"
+	mapWithPERFalse  = map[string]bool{
+		"disaster-recover-site": true,
+		"power-edge-router":     false,
+		"vpn-connections":       true,
+	}
+	mapWithPERTrue = map[string]bool{
+		"disaster-recover-site": true,
+		"power-edge-router":     true,
+		"vpn-connections":       true,
+	}
+	mapPERUnknown = map[string]bool{
+		"disaster-recover-site": true,
+		"power-vpn-connections": false,
+	}
+	defaultSysType           = "s922"
+	newSysType               = "s1022"
+	invalidZone              = "dal11"
+	validServiceInstanceGUID = ""
 )
 
 func validInstallConfig() *types.InstallConfig {
@@ -143,7 +164,7 @@ func validMinimalPlatform() *powervstypes.Platform {
 	return &powervstypes.Platform{
 		PowerVSResourceGroup: validPowerVSResourceGroup,
 		Region:               validRegion,
-		ServiceInstanceID:    validServiceInstanceID,
+		ServiceInstanceGUID:  validServiceInstanceGUID,
 		UserID:               validUserID,
 		Zone:                 validZone,
 	}
@@ -168,6 +189,16 @@ func TestValidate(t *testing.T) {
 			name:     "invalid architecture",
 			edits:    editFunctions{invalidArchitecture},
 			errorMsg: `^controlPlane.architecture\: Unsupported value\: \"ppc64\"\: supported values: \"ppc64le\"`,
+		},
+		{
+			name:     "invalid machine pool CIDR",
+			edits:    editFunctions{invalidMachinePoolCIDR},
+			errorMsg: `networking.machineNetwork\[0\].cidr: Invalid value: "192\.168\.0\.0/16": Machine Pool CIDR must be /24\.`,
+		},
+		{
+			name:     "valid machine pool CIDR",
+			edits:    editFunctions{validMachinePoolCIDR},
+			errorMsg: "",
 		},
 	}
 
@@ -289,7 +320,7 @@ func TestValidateCustomVPCSettings(t *testing.T) {
 			name: "invalid VPC name supplied, without VPC region, not found near PowerVS region",
 			edits: editFunctions{
 				func(ic *types.InstallConfig) {
-					ic.Platform.PowerVS.VPCName = invalidVPC
+					ic.Platform.PowerVS.VPC = invalidVPC
 				},
 			},
 			errorMsg: fmt.Sprintf(`VPC.vpcName: Not found: "%s"`, invalidVPC),
@@ -462,161 +493,198 @@ func createComputes(numComputes int32, compute *machinev1.PowerVSMachineProvider
 	return computes
 }
 
-func TestSystemPool(t *testing.T) {
+func TestValidatePERAvailability(t *testing.T) {
+	cases := []struct {
+		name     string
+		edits    editFunctions
+		errorMsg string
+	}{
+		{
+			name: "Region without PER",
+			edits: editFunctions{
+				func(ic *types.InstallConfig) {
+					ic.Platform.PowerVS.Zone = regionWithoutPER
+				},
+			},
+			errorMsg: fmt.Sprintf("power-edge-router is not available at: %s", regionWithoutPER),
+		},
+		{
+			name: "Region with PER",
+			edits: editFunctions{
+				func(ic *types.InstallConfig) {
+					ic.Platform.PowerVS.Zone = regionWithPER
+				},
+			},
+			errorMsg: "",
+		},
+		{
+			name: "Region with no PER availability info",
+			edits: editFunctions{
+				func(ic *types.InstallConfig) {
+					ic.Platform.PowerVS.Zone = regionPERUnknown
+				},
+			},
+			errorMsg: fmt.Sprintf("power-edge-router capability unknown at: %s", regionPERUnknown),
+		},
+	}
 	setMockEnvVars()
 
-	dedicatedControlPlane := machinev1.PowerVSMachineProviderConfig{
-		TypeMeta:      metav1.TypeMeta{Kind: "PowerVSMachineProviderConfig", APIVersion: "machine.openshift.io/v1"},
-		KeyPairName:   "rdr-hamzy-test3-syd04-vcwtz-key",
-		SystemType:    "e980",
-		ProcessorType: "Dedicated",
-		Processors:    intstr.IntOrString{Type: intstr.Int, IntVal: 1},
-		MemoryGiB:     32,
+	mockCtrl := gomock.NewController(t)
+	defer mockCtrl.Finish()
+
+	powervsClient := mock.NewMockAPI(mockCtrl)
+
+	// Mocks: PER-absent region results in false
+	powervsClient.EXPECT().GetDatacenterCapabilities(gomock.Any(), regionWithoutPER).Return(mapWithPERFalse, nil)
+
+	// Mocks: PER-enabled region results in true
+	powervsClient.EXPECT().GetDatacenterCapabilities(gomock.Any(), regionWithPER).Return(mapWithPERTrue, nil)
+
+	// Mocks: PER-unknown region results in false
+	powervsClient.EXPECT().GetDatacenterCapabilities(gomock.Any(), regionPERUnknown).Return(mapPERUnknown, nil)
+
+	// Run tests
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			editedInstallConfig := validInstallConfig()
+			for _, edit := range tc.edits {
+				edit(editedInstallConfig)
+			}
+
+			aggregatedErrors := powervs.ValidatePERAvailability(powervsClient, editedInstallConfig)
+			if tc.errorMsg != "" {
+				assert.Regexp(t, tc.errorMsg, aggregatedErrors)
+			} else {
+				assert.NoError(t, aggregatedErrors)
+			}
+		})
 	}
+}
 
-	dedicatedControlPlanes := createControlPlanes(5, &dedicatedControlPlane)
-
-	dedicatedCompute := machinev1.PowerVSMachineProviderConfig{
-		TypeMeta:      metav1.TypeMeta{Kind: "PowerVSMachineProviderConfig", APIVersion: "machine.openshift.io/v1"},
-		KeyPairName:   "rdr-hamzy-test3-syd04-vcwtz-key",
-		SystemType:    "e980",
-		ProcessorType: "Dedicated",
-		Processors:    intstr.IntOrString{Type: intstr.Int, IntVal: 1},
-		MemoryGiB:     32,
-	}
-
-	dedicatedComputes := createComputes(3, &dedicatedCompute)
-
-	systemPoolNEComputeCores := &models.System{
-		Cores:  func(f float64) *float64 { return &f }(2),
-		ID:     1,
-		Memory: func(i int64) *int64 { return &i }(256),
-	}
-	systemPoolsNEComputeCores := models.SystemPools{
-		"NotEnoughComputeCores": models.SystemPool{
-			Capacity:           systemPoolNEComputeCores,
-			CoreMemoryRatio:    float64(1.0),
-			MaxAvailable:       systemPoolNEComputeCores,
-			MaxCoresAvailable:  systemPoolNEComputeCores,
-			MaxMemoryAvailable: systemPoolNEComputeCores,
-			SharedCoreRatio: &models.MinMaxDefault{
-				Default: func(f float64) *float64 { return &f }(4),
-				Max:     func(f float64) *float64 { return &f }(4),
-				Min:     func(f float64) *float64 { return &f }(1),
+func TestValidateSystemTypeForZone(t *testing.T) {
+	cases := []struct {
+		name     string
+		edits    editFunctions
+		errorMsg string
+	}{
+		{
+			name: "Unknown Zone specified",
+			edits: editFunctions{
+				func(ic *types.InstallConfig) {
+					ic.Platform.PowerVS.Zone = invalidZone
+					ic.ControlPlane.Platform.PowerVS = validMachinePool()
+					ic.ControlPlane.Platform.PowerVS.SysType = defaultSysType
+				},
 			},
-			Systems: []*models.System{
-				systemPoolNEComputeCores,
+			errorMsg: fmt.Sprintf("%s is not available in: %s, these are \\[\\]", defaultSysType, invalidZone),
+		},
+		{
+			name: "No Platform block",
+			edits: editFunctions{
+				func(ic *types.InstallConfig) {
+					ic.ControlPlane.Platform.PowerVS = nil
+				},
 			},
-			Type: "e980",
+			errorMsg: "",
+		},
+		{
+			name: "Structure present, but no SysType specified",
+			edits: editFunctions{
+				func(ic *types.InstallConfig) {
+					ic.ControlPlane.Platform.PowerVS = validMachinePool()
+				},
+			},
+			errorMsg: "",
+		},
+		{
+			name: "Unavailable SysType specified for dal12 zone",
+			edits: editFunctions{
+				func(ic *types.InstallConfig) {
+					ic.Platform.PowerVS.Region = validRegion
+					ic.Platform.PowerVS.Zone = validZone
+					ic.ControlPlane.Platform.PowerVS = validMachinePool()
+					ic.ControlPlane.Platform.PowerVS.SysType = newSysType
+				},
+			},
+			errorMsg: fmt.Sprintf("%s is not available in: %s", newSysType, validZone),
+		},
+		// @TODO Come up with a "Good Zone/SysType combo specified" test
+	}
+	setMockEnvVars()
+
+	mockCtrl := gomock.NewController(t)
+	defer mockCtrl.Finish()
+
+	powervsClient := mock.NewMockAPI(mockCtrl)
+
+	// FIX: Unexpected call to *mock.MockAPI.GetDatacenterSupportedSystems([context.Background dal11]) at /home/OpenShift/git/hamzy-installer/pkg/asset/installconfig/powervs/validation.go:268 because: there are no expected calls of the method "GetDatacenterSupportedSystems" for that receiver
+	powervsClient.EXPECT().GetDatacenterSupportedSystems(gomock.Any(), gomock.Any()).AnyTimes()
+
+	// Run tests
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			editedInstallConfig := validInstallConfig()
+			for _, edit := range tc.edits {
+				edit(editedInstallConfig)
+			}
+
+			aggregatedErrors := powervs.ValidateSystemTypeForZone(powervsClient, editedInstallConfig)
+			if tc.errorMsg != "" {
+				assert.Regexp(t, tc.errorMsg, aggregatedErrors)
+			} else {
+				assert.NoError(t, aggregatedErrors)
+			}
+		})
+	}
+}
+
+func TestValidateServiceInstance(t *testing.T) {
+	cases := []struct {
+		name     string
+		edits    editFunctions
+		errorMsg string
+	}{
+		{
+			name:     "valid install config",
+			edits:    editFunctions{},
+			errorMsg: "",
+		},
+		{
+			name: "invalid install config",
+			edits: editFunctions{
+				func(ic *types.InstallConfig) {
+					ic.Platform.PowerVS.ServiceInstanceGUID = "invalid-uuid"
+				},
+			},
+			errorMsg: "platform:powervs:serviceInstanceGUID has an invalid guid",
 		},
 	}
-	systemPoolNEWorkerCores := &models.System{
-		Cores:  func(f float64) *float64 { return &f }(6),
-		ID:     1,
-		Memory: func(i int64) *int64 { return &i }(256),
-	}
-	systemPoolsNEWorkerCores := models.SystemPools{
-		"NotEnoughWorkerCores": models.SystemPool{
-			Capacity:           systemPoolNEWorkerCores,
-			CoreMemoryRatio:    float64(1.0),
-			MaxAvailable:       systemPoolNEWorkerCores,
-			MaxCoresAvailable:  systemPoolNEWorkerCores,
-			MaxMemoryAvailable: systemPoolNEWorkerCores,
-			SharedCoreRatio: &models.MinMaxDefault{
-				Default: func(f float64) *float64 { return &f }(4),
-				Max:     func(f float64) *float64 { return &f }(4),
-				Min:     func(f float64) *float64 { return &f }(1),
-			},
-			Systems: []*models.System{
-				systemPoolNEWorkerCores,
-			},
-			Type: "e980",
-		},
-	}
-	systemPoolNEComputeMemory := &models.System{
-		Cores:  func(f float64) *float64 { return &f }(8),
-		ID:     1,
-		Memory: func(i int64) *int64 { return &i }(32),
-	}
-	systemPoolsNEComputeMemory := models.SystemPools{
-		"NotEnoughComputeMemory": models.SystemPool{
-			Capacity:           systemPoolNEComputeMemory,
-			CoreMemoryRatio:    float64(1.0),
-			MaxAvailable:       systemPoolNEComputeMemory,
-			MaxCoresAvailable:  systemPoolNEComputeMemory,
-			MaxMemoryAvailable: systemPoolNEComputeMemory,
-			SharedCoreRatio: &models.MinMaxDefault{
-				Default: func(f float64) *float64 { return &f }(4),
-				Max:     func(f float64) *float64 { return &f }(4),
-				Min:     func(f float64) *float64 { return &f }(1),
-			},
-			Systems: []*models.System{
-				systemPoolNEComputeMemory,
-			},
-			Type: "e980",
-		},
-	}
-	systemPoolNEWorkerMemory := &models.System{
-		Cores:  func(f float64) *float64 { return &f }(8),
-		ID:     1,
-		Memory: func(i int64) *int64 { return &i }(192),
-	}
-	systemPoolsNEWorkerMemory := models.SystemPools{
-		"NotEnoughWorkerMemory": models.SystemPool{
-			Capacity:           systemPoolNEWorkerMemory,
-			CoreMemoryRatio:    float64(1.0),
-			MaxAvailable:       systemPoolNEWorkerMemory,
-			MaxCoresAvailable:  systemPoolNEWorkerMemory,
-			MaxMemoryAvailable: systemPoolNEWorkerMemory,
-			SharedCoreRatio: &models.MinMaxDefault{
-				Default: func(f float64) *float64 { return &f }(4),
-				Max:     func(f float64) *float64 { return &f }(4),
-				Min:     func(f float64) *float64 { return &f }(1),
-			},
-			Systems: []*models.System{
-				systemPoolNEWorkerMemory,
-			},
-			Type: "e980",
-		},
-	}
-	systemPoolGood := &models.System{
-		Cores:  func(f float64) *float64 { return &f }(8),
-		ID:     1,
-		Memory: func(i int64) *int64 { return &i }(256),
-	}
-	systemPoolsGood := models.SystemPools{
-		"Enough": models.SystemPool{
-			Capacity:           systemPoolGood,
-			CoreMemoryRatio:    float64(1.0),
-			MaxAvailable:       systemPoolGood,
-			MaxCoresAvailable:  systemPoolGood,
-			MaxMemoryAvailable: systemPoolGood,
-			SharedCoreRatio: &models.MinMaxDefault{
-				Default: func(f float64) *float64 { return &f }(4),
-				Max:     func(f float64) *float64 { return &f }(4),
-				Min:     func(f float64) *float64 { return &f }(1),
-			},
-			Systems: []*models.System{
-				systemPoolGood,
-			},
-			Type: "e980",
-		},
-	}
+	setMockEnvVars()
 
-	err := powervs.ValidateCapacityWithPools(dedicatedControlPlanes, dedicatedComputes, systemPoolsNEComputeCores)
-	assert.EqualError(t, err, "Not enough cores available (2) for the compute nodes (need 5)")
+	mockCtrl := gomock.NewController(t)
+	defer mockCtrl.Finish()
 
-	err = powervs.ValidateCapacityWithPools(dedicatedControlPlanes, dedicatedComputes, systemPoolsNEWorkerCores)
-	assert.EqualError(t, err, "Not enough cores available (1) for the worker nodes (need 3)")
+	powervsClient := mock.NewMockAPI(mockCtrl)
 
-	err = powervs.ValidateCapacityWithPools(dedicatedControlPlanes, dedicatedComputes, systemPoolsNEComputeMemory)
-	assert.EqualError(t, err, "Not enough memory available (32) for the compute nodes (need 160)")
+	// FIX: Unexpected call to *mock.MockAPI.ListServiceInstances([context.TODO.WithDeadline(2023-12-02 08:38:15.542340268 -0600 CST m=+300.012357408 [4m59.999979046s])]) at validation.go:289 because: there are no expected calls of the method "ListServiceInstances" for that receiver
+	powervsClient.EXPECT().ListServiceInstances(gomock.Any()).AnyTimes()
 
-	err = powervs.ValidateCapacityWithPools(dedicatedControlPlanes, dedicatedComputes, systemPoolsNEWorkerMemory)
-	assert.EqualError(t, err, "Not enough memory available (32) for the worker nodes (need 96)")
+	// Run tests
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			editedInstallConfig := validInstallConfig()
+			for _, edit := range tc.edits {
+				edit(editedInstallConfig)
+			}
 
-	err = powervs.ValidateCapacityWithPools(dedicatedControlPlanes, dedicatedComputes, systemPoolsGood)
-	assert.Empty(t, err)
+			aggregatedErrors := powervs.ValidateServiceInstance(powervsClient, editedInstallConfig)
+			if tc.errorMsg != "" {
+				assert.Regexp(t, tc.errorMsg, aggregatedErrors)
+			} else {
+				assert.NoError(t, aggregatedErrors)
+			}
+		})
+	}
 }
 
 func setMockEnvVars() {

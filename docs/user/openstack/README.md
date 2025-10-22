@@ -1,7 +1,7 @@
 # OpenStack Platform Support
 
 This document discusses the requirements, current expected behavior, and how to try out what exists so far.
-In addition, it covers the installation with the default CNI (OVNKubernetes), as well as with the Kuryr SDN.
+It covers the installation with the default CNI (OVNKubernetes).
 
 ## Table of Contents
 
@@ -54,22 +54,41 @@ In addition, it covers the installation with the default CNI (OVNKubernetes), as
 
 ## Reference Documents
 
+- [Observability](observability.md)
 - [Privileges](privileges.md)
+- [Control plane machine set](control-plane-machine-set.md)
 - [Known Issues and Workarounds](known-issues.md)
-- [Using the OSP 4 installer with Kuryr](kuryr.md)
 - [Troubleshooting your cluster](troubleshooting.md)
 - [Customizing your install](customization.md)
 - [Installing OpenShift on OpenStack User-Provisioned Infrastructure](install_upi.md)
-- [Learn about the OpenShift on OpenStack networking infrastructure design](../../design/openstack/networking-infrastructure.md)
 - [Deploying OpenShift bare-metal workers](deploy_baremetal_workers.md)
 - [Deploying OpenShift single root I/O virtualization (SRIOV) workers](deploy_sriov_workers.md)
 - [Deploying OpenShift with OVS-DPDK](ovs-dpdk.md)
+- [Deploying OpenShift with an external load balancer](external_load_balancer.md)
 - [Provider Networks](provider_networks.md)
 - [Migrate the Image Registry from Cinder to Swift](image-registry-storage-swift.md)
+- [Image Registry With A Custom PVC Backend](image_registry_with_custom_pvc_backends.md)
+- [Adding Worker Nodes By Hand](add_worker_nodes_by_hand.md)
+- [Connecting workers nodes and pods to an IPv6 network](connect_nodes_to_ipv6_network.md)
+- [Connecting worker nodes to a dedicated Manila network](connect_nodes_to_manila_network.md)
+- [Learn about the OpenShift on OpenStack networking infrastructure design](../../design/openstack/networking-infrastructure.md)
+- [Deploying OpenShift vGPU workers](vgpu.md)
 
 ## OpenStack Requirements
 
-In order to run the latest version of the installer in OpenStack, at a bare minimum you need the following quota to run a *default* cluster. While it is possible to run the cluster with fewer resources than this, it is not recommended. Certain cases, such as deploying [without FIPs](#without-floating-ips), or deploying with an [external load balancer](#using-an-external-load-balancer) are documented below, and are not included in the scope of this recommendation. If you are planning on using Kuryr, or want to learn more about it, please read through the [Kuryr documentation](kuryr.md).
+The OpenShift installation on OpenStack platform relies on a number of core
+services being available:
+
+- Keystone
+- Neutron
+- Nova
+  - with Metadata service enabled
+- Glance
+- Storage solution for the image registry, one of:
+  - Swift
+  - Cinder
+
+In order to run the latest version of the installer in OpenStack, at a bare minimum you need the following quota to run a *default* cluster. While it is possible to run the cluster with fewer resources than this, it is not recommended. Certain cases, such as deploying [without FIPs](#without-floating-ips), or deploying with an [external load balancer](#using-an-external-load-balancer) are documented below, and are not included in the scope of this recommendation.
 
 For a successful installation it is required:
 
@@ -86,8 +105,9 @@ For a successful installation it is required:
 - Depending on the type of [image registry backend](#image-registry-requirements) either 1 Swift container or an additional 100 GB volume.
 - OpenStack resource tagging
 
-> **NOTE:**
-> The installer will check OpenStack quota limits to make sure that the requested resources can be created. Note that it won't check for resource availability in the cloud, but only on the quotas.
+> **Note**
+> The installer will check OpenStack quota limits to make sure that the requested resources can be created.
+> Note that it won't check for resource availability in the cloud, but only on the quotas.
 
 You may need to increase the security group related quotas from their default values. For example (as an OpenStack administrator):
 
@@ -101,7 +121,7 @@ Once you configure the quota for your project, please ensure that the user for t
 
 The default deployment stands up 3 master nodes, which is the minimum amount required for a cluster. For each master node you stand up, you will need 1 instance, and 1 port available in your quota. They should be assigned a flavor with at least 16 GB RAM, 4 vCPUs, and 100 GB Disk (or Root Volume). It is theoretically possible to run with a smaller flavor, but be aware that if it takes too long to stand up services, or certain essential services crash, the installer could time out, leading to a failed install.
 
-The master nodes are placed in a single Server group with "soft anti-affinity" policy by default; the machines will therefore be created on separate hosts when possible.
+The master nodes are placed in a single Server group with "soft anti-affinity" policy by default; the machines will therefore be created on separate hosts when possible. Note that this is also the case when the master nodes are deployed across multiple availability zones that were specified by their failure domain.
 
 ### Worker Nodes
 
@@ -113,7 +133,11 @@ See the [OpenShift documentation](https://docs.openshift.com/container-platform/
 
 ### Bootstrap Node
 
-The bootstrap node is a temporary node that is responsible for standing up the control plane on the masters. Only one bootstrap node will be stood up and it will be deprovisioned once the production control plane is ready. To do so, you need 1 instance, and 1 port. We recommend a flavor with a minimum of 16 GB RAM, 4 vCPUs, and 100 GB Disk (or Root Volume).
+The bootstrap node is a temporary node that is responsible for standing up the control plane on the masters. Only one bootstrap node will be stood up and it will be deprovisioned once the production control plane is ready. To do so, you need 1 instance, and 1 port. We recommend a flavor with a minimum of 16 GB RAM, 4 vCPUs, and 100 GB Disk (or Root Volume), it can be created using below command:
+
+```sh
+openstack flavor create --ram 16384 --disk 128 --vcpu 4 okd-cluster
+```
 
 ### Image Registry Requirements
 
@@ -127,7 +151,12 @@ openstack role add --user <user> --project <project> swiftoperator
 
 If Swift is not available, the [PVC](https://kubernetes.io/docs/concepts/storage/persistent-volumes/#persistentvolumeclaims) storage is used as the backend. For this purpose, a persistent volume of 100 GB will be created in Cinder and mounted to the image registry pod during the installation.
 
-**Note:** If you are deploying a cluster in an Availability Zone where Swift isn't available but where Cinder is, it is recommended to deploy the Image Registry with Cinder backend. It will try to schedule the volume into the same AZ as the Nova zone where the PVC is located; otherwise it'll pick the default availability zone. If needed, the Image registry can be moved to another availability zone by a day 2 operation.
+> **Note**
+> If you are deploying a cluster in an Availability Zone where Swift isn't available but where Cinder is,
+> it is recommended to deploy the Image Registry with Cinder backend.
+> It will try to schedule the volume into the same AZ as the Nova zone where the PVC is located;
+> otherwise it'll pick the default availability zone.
+> If needed, the Image registry can be moved to another availability zone by a day 2 operation.
 
 If you want to force Cinder to be used as a backend for the Image Registry, you need to remove the `swiftoperator` permissions. As an OpenStack administrator:
 
@@ -135,7 +164,9 @@ If you want to force Cinder to be used as a backend for the Image Registry, you 
 openstack role remove --user <user> --project <project> swiftoperator
 ```
 
-**Note:** Since Cinder supports only [ReadWriteOnce](https://kubernetes.io/docs/concepts/storage/persistent-volumes/#access-modes) access mode, it's not possible to have more than one replica of the image registry pod.
+> **Note**
+> Since Cinder supports only [ReadWriteOnce](https://kubernetes.io/docs/concepts/storage/persistent-volumes/#access-modes) access mode,
+> it's not possible to have more than one replica of the image registry pod.
 
 ### Disk Requirements
 
@@ -202,8 +233,9 @@ openstack network list --long -c ID -c Name -c "Router Type"
 +--------------------------------------+----------------+-------------+
 ```
 
-> **NOTE:**
-> If the Neutron `trunk` service plug-in is enabled, trunk port will be created by default. For more information, please refer to [neutron trunk port](https://wiki.openstack.org/wiki/Neutron/TrunkPort).
+> **Note**
+> If the Neutron `trunk` service plug-in is enabled, trunk port will be created by default.
+> For more information, please refer to [neutron trunk port](https://wiki.openstack.org/wiki/Neutron/TrunkPort).
 
 ### Nova Metadata Service
 
@@ -328,8 +360,12 @@ openstack floating ip create --description "Ingress <cluster name>.<base domain>
 # => <ingressFloatingIP>
 ```
 
-> **NOTE:**
-> These IP addresses will **not** show up attached to any particular server (e.g. when running `openstack server list`). Similarly, the API and Ingress ports will always be in the `DOWN` state. This is because the ports are not attached to the servers directly. Instead, their fixed IP addresses are managed by keepalived. This has no record in Neutron's database and as such, is not visible to OpenStack.
+> **Note**
+> These IP addresses will **not** show up attached to any particular server (e.g. when running `openstack server list`).
+> Similarly, the API and Ingress ports will always be in the `DOWN` state.
+> This is because the ports are not attached to the servers directly.
+> Instead, their fixed IP addresses are managed by keepalived.
+> This has no record in Neutron's database and as such, is not visible to OpenStack.
 
 *The network traffic will flow through even though the IPs and ports do not show up in the servers*.
 
@@ -397,7 +433,7 @@ Even if the installer times out, the OpenShift cluster should still come up. Onc
 
 ### Running a Deployment
 
-To run the installer, you have the option of using the interactive wizard, or providing your own `install-config.yaml` file for it. The wizard is the easier way to run the installer, but passing your own `install-config.yaml` enables you to use more fine grained customizations. If you are going to create your own `install-config.yaml`, read through the available [OpenStack customizations](customization.md). For information on running the installer with Kuryr, see the [Kuryr docs](kuryr.md).
+To run the installer, you have the option of using the interactive wizard, or providing your own `install-config.yaml` file for it. The wizard is the easier way to run the installer, but passing your own `install-config.yaml` enables you to use more fine grained customizations. If you are going to create your own `install-config.yaml`, read through the available [OpenStack customizations](customization.md).
 
 ```sh
 ./openshift-install create cluster --dir ostest
@@ -540,7 +576,7 @@ spec:
 
 #### Defining a MachineSet That Uses Multiple Networks
 
-To define a MachineSet with multiple networks, the `primarySubnet` value in the `providerSpec` must be set to the OpenStack subnet that you want the Kubernetes endpoints of the nodes to be published on. For most use cases, this is the same subnet as the [machinesSubnet](./customization.md#cluster-scoped-properties) in the `install-config.yaml`.
+To define a MachineSet with multiple networks, the `primarySubnet` value in the `providerSpec` must be set to the OpenStack subnet that you want the Kubernetes endpoints of the nodes to be published on. For most use cases, this is the same subnet(s) as the subnets listed in [controlPlanePort](./customization.md#cluster-scoped-properties) in the `install-config.yaml`.
 
  After you set the subnet, add all of the networks that you want to attach to your machines to the `Networks` list in `providerSpec`. You must also add the network that the primary subnet is part of to this list.
 
@@ -568,9 +604,6 @@ In order to use Availability Zones, create one MachineSet per target
 Availability Zone, and set the Availability Zone in the `availabilityZone`
 property of the MachineSet.
 
-> **NOTE:**
-> When deploying with `Kuryr` there is an Octavia API loadbalancer VM that will not fulfill the Availability Zones restrictions due to Octavia lack of support for it. In addition, if Octavia only has the amphora provider instead of also the OVN-Octavia provider, all the OpenShift services will be backed up by Octavia Load Balancer VMs which will not fulfill the Availability Zone restrictions either.
-
 [server-group-docs]: https://docs.openstack.org/api-ref/compute/?expanded=create-server-group-detail#create-server-group
 
 ### Using a Custom External Load Balancer
@@ -584,7 +617,8 @@ Add the following external facing services to your new load balancer:
 - The master nodes serve the OpenShift API on port 6443 using TCP.
 - The apps hosted on the worker nodes are served on ports 80, and 443. They are both served using TCP.
 
-Note: Make sure the instance that your new load balancer is running on has security group rules that allow TCP traffic over these ports.
+> **Note**
+> Make sure the instance that your new load balancer is running on has security group rules that allow TCP traffic over these ports.
 
 #### HAProxy Example Load Balancer Config
 
@@ -647,7 +681,8 @@ Result:
 }
 ```
 
-Note: The versions in the sample output may differ from your own. As long as you get a JSON payload response, the API is accessible.
+> **Note**
+> The versions in the sample output may differ from your own. As long as you get a JSON payload response, the API is accessible.
 
 #### Verifying that Apps Reachable
 
@@ -685,8 +720,9 @@ If you need to update the OpenStack cloud provider configuration you can edit th
 oc edit configmap -n openshift-config cloud-provider-config
 ```
 
-> **NOTE:**
-> It can take a while to reconfigure the cluster depending on the size of it. The reconfiguration is completed once no node is getting `SchedulingDisabled` taint anymore.
+> **Note**
+> It can take a while to reconfigure the cluster depending on the size of it.
+> The reconfiguration is completed once no node is getting `SchedulingDisabled` taint anymore.
 
 There are several things you can change:
 

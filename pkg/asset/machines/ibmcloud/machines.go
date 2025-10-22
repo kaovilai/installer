@@ -9,6 +9,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 
 	machineapi "github.com/openshift/api/machine/v1beta1"
+	ibmcloudic "github.com/openshift/installer/pkg/asset/installconfig/ibmcloud"
 	"github.com/openshift/installer/pkg/types"
 	"github.com/openshift/installer/pkg/types/ibmcloud"
 	ibmcloudprovider "github.com/openshift/machine-api-provider-ibmcloud/pkg/apis/ibmcloudprovider/v1"
@@ -89,6 +90,12 @@ func provider(clusterID string,
 		resourceGroup = clusterID
 	}
 
+	// Set the ProviderSpec.BootVolume, with encryption key if provided
+	bootVolume := ibmcloudprovider.IBMCloudMachineBootVolume{}
+	if mpool.BootVolume != nil && mpool.BootVolume.EncryptionKey != "" {
+		bootVolume.EncryptionKey = mpool.BootVolume.EncryptionKey
+	}
+
 	// Set the ProviderSpec.NetworkResourceGroup if NetworkResourceGroupName was provided
 	var networkResourceGroup string
 	if platform.NetworkResourceGroupName != "" {
@@ -123,6 +130,7 @@ func provider(clusterID string,
 			Kind:       "IBMCloudMachineProviderSpec",
 		},
 		VPC:                  vpc,
+		BootVolume:           bootVolume,
 		DedicatedHost:        dedicatedHost,
 		Tags:                 []ibmcloudprovider.TagSpecs{},
 		Image:                fmt.Sprintf("%s-rhcos", clusterID),
@@ -137,7 +145,6 @@ func provider(clusterID string,
 		},
 		UserDataSecret:    &corev1.LocalObjectReference{Name: userDataSecret},
 		CredentialsSecret: &corev1.LocalObjectReference{Name: "ibmcloud-credentials"},
-		// TODO: IBM: Boot volume encryption key
 	}, nil
 }
 
@@ -154,24 +161,13 @@ func getDedicatedHostNameForZone(clusterID string, role string, zone string) (st
 
 func getSubnet(subnets map[string]string, clusterID string, role string, zone string) (string, error) {
 	if len(subnets) == 0 {
-		return getSubnetName(clusterID, role, zone)
+		return ibmcloudic.CreateSubnetName(clusterID, role, zone)
 	}
 
 	if subnet, found := subnets[zone]; found {
 		return subnet, nil
 	}
 	return "", fmt.Errorf("no subnet found for %s", zone)
-}
-
-func getSubnetName(clusterID string, role string, zone string) (string, error) {
-	switch role {
-	case "master":
-		return fmt.Sprintf("%s-subnet-control-plane-%s", clusterID, zone), nil
-	case "worker":
-		return fmt.Sprintf("%s-subnet-compute-%s", clusterID, zone), nil
-	default:
-		return "", fmt.Errorf("invalid machine role %v", role)
-	}
 }
 
 func getSecurityGroupNames(clusterID string, role string) ([]string, error) {

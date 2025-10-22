@@ -1,14 +1,15 @@
 package powervs
 
 import (
+	"context"
+	"fmt"
 	"math"
-	"net/http"
+	gohttp "net/http"
 	"strings"
 	"time"
 
 	"github.com/IBM/go-sdk-core/v5/core"
 	"github.com/IBM/vpc-go-sdk/vpcv1"
-	"github.com/pkg/errors"
 	"k8s.io/apimachinery/pkg/util/wait"
 )
 
@@ -16,76 +17,140 @@ const securityGroupTypeName = "security group"
 
 // listSecurityGroups lists security groups in the vpc.
 func (o *ClusterUninstaller) listSecurityGroups() (cloudResources, error) {
-	o.Logger.Debugf("Listing security groups")
+	var (
+		sgIDs         []string
+		sgID          string
+		ctx           context.Context
+		cancel        context.CancelFunc
+		result        = make([]cloudResource, 0, 1)
+		options       *vpcv1.GetSecurityGroupOptions
+		securityGroup *vpcv1.SecurityGroup
+		response      *core.DetailedResponse
+		err           error
+	)
 
-	ctx, cancel := o.contextWithTimeout()
+	if o.searchByTag {
+		// Should we list by tag matching?
+		sgIDs, err = o.listByTag(TagTypeSecurityGroup)
+	} else {
+		// Otherwise list will list by name matching.
+		sgIDs, err = o.listSecurityGroupsByName()
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	ctx, cancel = contextWithTimeout()
 	defer cancel()
 
-	select {
-	case <-ctx.Done():
-		o.Logger.Debugf("listSecurityGroups: case <-ctx.Done()")
-		return nil, o.Context.Err() // we're cancelled, abort
-	default:
-	}
-
-	options := o.vpcSvc.NewListSecurityGroupsOptions()
-	resources, _, err := o.vpcSvc.ListSecurityGroupsWithContext(ctx, options)
-
-	if err != nil {
-		return nil, errors.Wrapf(err, "failed to list security groups")
-	}
-
-	var foundOne = false
-
-	result := []cloudResource{}
-	for _, securityGroup := range resources.SecurityGroups {
-		if strings.Contains(*securityGroup.Name, o.InfraID) {
-			foundOne = true
-			o.Logger.Debugf("listSecurityGroups: FOUND: %s, %s", *securityGroup.ID, *securityGroup.Name)
-			result = append(result, cloudResource{
-				key:      *securityGroup.ID,
-				name:     *securityGroup.Name,
-				status:   "",
-				typeName: securityGroupTypeName,
-				id:       *securityGroup.ID,
-			})
+	for _, sgID = range sgIDs {
+		select {
+		case <-ctx.Done():
+			o.Logger.Debugf("listSecurityGroups: case <-ctx.Done()")
+			return nil, ctx.Err() // we're cancelled, abort
+		default:
 		}
-	}
-	if !foundOne {
-		o.Logger.Debugf("listSecurityGroups: NO matching security group against: %s", o.InfraID)
-		for _, securityGroup := range resources.SecurityGroups {
-			o.Logger.Debugf("listSecurityGroups: security group: %s", *securityGroup.Name)
+
+		options = o.vpcSvc.NewGetSecurityGroupOptions(sgID)
+
+		securityGroup, response, err = o.vpcSvc.GetSecurityGroupWithContext(ctx, options)
+		if err != nil && response != nil && response.StatusCode == gohttp.StatusNotFound {
+			// The security group could have been deleted just after a list was created.
+			continue
 		}
+		if err != nil {
+			return nil, fmt.Errorf("failed to get security group (%s): err = %w, response = %v", sgID, err, response)
+		}
+
+		result = append(result, cloudResource{
+			key:      *securityGroup.ID,
+			name:     *securityGroup.Name,
+			status:   "",
+			typeName: securityGroupTypeName,
+			id:       *securityGroup.ID,
+		})
 	}
 
 	return cloudResources{}.insert(result...), nil
 }
 
+// listSecurityGroupsByName lists security groups in the vpc.
+func (o *ClusterUninstaller) listSecurityGroupsByName() ([]string, error) {
+	var (
+		ctx           context.Context
+		cancel        context.CancelFunc
+		options       *vpcv1.ListSecurityGroupsOptions
+		sgCollection  *vpcv1.SecurityGroupCollection
+		response      *core.DetailedResponse
+		foundOne      = false
+		result        = make([]string, 0, 1)
+		securityGroup vpcv1.SecurityGroup
+		err           error
+	)
+
+	o.Logger.Debugf("Listing security groups by NAME")
+
+	ctx, cancel = contextWithTimeout()
+	defer cancel()
+
+	select {
+	case <-ctx.Done():
+		o.Logger.Debugf("listSecurityGroupsByName: case <-ctx.Done()")
+		return nil, ctx.Err() // we're cancelled, abort
+	default:
+	}
+
+	options = o.vpcSvc.NewListSecurityGroupsOptions()
+	options.SetResourceGroupID(o.resourceGroupID)
+
+	sgCollection, response, err = o.vpcSvc.ListSecurityGroupsWithContext(ctx, options)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list security groups: response = %v, err = %w", response, err)
+	}
+
+	for _, securityGroup = range sgCollection.SecurityGroups {
+		if strings.Contains(*securityGroup.Name, o.InfraID) {
+			foundOne = true
+			o.Logger.Debugf("listSecurityGroupsByName: FOUND: %s, %s", *securityGroup.ID, *securityGroup.Name)
+			result = append(result, *securityGroup.ID)
+		}
+	}
+	if !foundOne {
+		o.Logger.Debugf("listSecurityGroupsByName: NO matching security group against: %s", o.InfraID)
+		for _, securityGroup = range sgCollection.SecurityGroups {
+			o.Logger.Debugf("listSecurityGroupsByName: security group: %s", *securityGroup.Name)
+		}
+	}
+
+	return result, nil
+}
+
+// deleteSecurityGroup deletes the specified security group.
 func (o *ClusterUninstaller) deleteSecurityGroup(item cloudResource) error {
 	var getOptions *vpcv1.GetSecurityGroupOptions
 	var response *core.DetailedResponse
 	var err error
 
-	ctx, cancel := o.contextWithTimeout()
+	ctx, cancel := contextWithTimeout()
 	defer cancel()
 
 	select {
 	case <-ctx.Done():
 		o.Logger.Debugf("deleteSecurityGroup: case <-ctx.Done()")
-		return o.Context.Err() // we're cancelled, abort
+		return ctx.Err() // we're cancelled, abort
 	default:
 	}
 
 	getOptions = o.vpcSvc.NewGetSecurityGroupOptions(item.id)
 	_, response, err = o.vpcSvc.GetSecurityGroup(getOptions)
 
-	if err != nil && response != nil && response.StatusCode == http.StatusNotFound {
+	if err != nil && response != nil && response.StatusCode == gohttp.StatusNotFound {
 		// The resource is gone
 		o.deletePendingItems(item.typeName, []cloudResource{item})
 		o.Logger.Infof("Deleted Security Group %q", item.name)
 		return nil
 	}
-	if err != nil && response != nil && response.StatusCode == http.StatusInternalServerError {
+	if err != nil && response != nil && response.StatusCode == gohttp.StatusInternalServerError {
 		o.Logger.Infof("deleteSecurityGroup: internal server error")
 		return nil
 	}
@@ -94,7 +159,7 @@ func (o *ClusterUninstaller) deleteSecurityGroup(item cloudResource) error {
 
 	_, err = o.vpcSvc.DeleteSecurityGroupWithContext(ctx, deleteOptions)
 	if err != nil {
-		return errors.Wrapf(err, "failed to delete security group %s", item.name)
+		return fmt.Errorf("failed to delete security group %s: %w", item.name, err)
 	}
 
 	o.Logger.Infof("Deleted Security Group %q", item.name)
@@ -117,14 +182,14 @@ func (o *ClusterUninstaller) destroySecurityGroups() error {
 
 	items := o.insertPendingItems(securityGroupTypeName, firstPassList.list())
 
-	ctx, cancel := o.contextWithTimeout()
+	ctx, cancel := contextWithTimeout()
 	defer cancel()
 
 	for _, item := range items {
 		select {
 		case <-ctx.Done():
 			o.Logger.Debugf("destroySecurityGroups: case <-ctx.Done()")
-			return o.Context.Err() // we're cancelled, abort
+			return ctx.Err() // we're cancelled, abort
 		default:
 		}
 
@@ -133,7 +198,7 @@ func (o *ClusterUninstaller) destroySecurityGroups() error {
 			Factor:   1.1,
 			Cap:      leftInContext(ctx),
 			Steps:    math.MaxInt32}
-		err = wait.ExponentialBackoffWithContext(ctx, backoff, func() (bool, error) {
+		err = wait.ExponentialBackoffWithContext(ctx, backoff, func(context.Context) (bool, error) {
 			err2 := o.deleteSecurityGroup(item)
 			if err2 == nil {
 				return true, err2
@@ -150,7 +215,14 @@ func (o *ClusterUninstaller) destroySecurityGroups() error {
 		for _, item := range items {
 			o.Logger.Debugf("destroyServiceInstances: found %s in pending items", item.name)
 		}
-		return errors.Errorf("destroySecurityGroups: %d undeleted items pending", len(items))
+		return fmt.Errorf("destroySecurityGroups: %d undeleted items pending", len(items))
+	}
+
+	select {
+	case <-ctx.Done():
+		o.Logger.Debugf("destroySecurityGroups: case <-ctx.Done()")
+		return ctx.Err() // we're cancelled, abort
+	default:
 	}
 
 	backoff := wait.Backoff{
@@ -158,7 +230,7 @@ func (o *ClusterUninstaller) destroySecurityGroups() error {
 		Factor:   1.1,
 		Cap:      leftInContext(ctx),
 		Steps:    math.MaxInt32}
-	err = wait.ExponentialBackoffWithContext(ctx, backoff, func() (bool, error) {
+	err = wait.ExponentialBackoffWithContext(ctx, backoff, func(context.Context) (bool, error) {
 		secondPassList, err2 := o.listSecurityGroups()
 		if err2 != nil {
 			return false, err2

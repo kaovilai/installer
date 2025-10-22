@@ -6,6 +6,9 @@ locals {
   # If we need to setup SecurityGroupRules to SSH to bootstrap, for non-public clusters (no Floating IP)
   # combine the Control Plane and Compute subnet CIDRs, to create rules for ingress on those CIDR's
   all_subnet_cidrs = local.public_endpoints ? [] : concat(data.ibm_is_subnet.control_plane_subnets[*].ipv4_cidr_block, data.ibm_is_subnet.compute_subnets[*].ipv4_cidr_block)
+
+  # If a boot volume encryption key CRN was supplied, create a list containing that CRN, otherwise an empty list for a dynamic block of boot volumes
+  boot_volume_key_crns = var.ibmcloud_control_plane_boot_volume_key == "" ? [] : [var.ibmcloud_control_plane_boot_volume_key]
 }
 
 ############################################
@@ -40,6 +43,13 @@ resource "ibm_is_instance" "bootstrap_node" {
     security_groups = concat(var.control_plane_security_group_id_list, [ibm_is_security_group.bootstrap.id])
   }
 
+  dynamic "boot_volume" {
+    for_each = local.boot_volume_key_crns
+    content {
+      encryption = boot_volume.value
+    }
+  }
+
   dedicated_host = length(var.control_plane_dedicated_host_id_list) > 0 ? var.control_plane_dedicated_host_id_list[0] : null
 
   vpc  = var.vpc_id
@@ -51,7 +61,7 @@ resource "ibm_is_instance" "bootstrap_node" {
   # terraform-provider-ignition, we should use it instead of this template.
   # https://github.com/community-terraform-providers/terraform-provider-ignition/issues/16
   user_data = templatefile("${path.module}/templates/bootstrap.ign", {
-    HOSTNAME    = ibm_cos_bucket.bootstrap_ignition.s3_endpoint_direct
+    HOSTNAME    = replace(ibm_cos_bucket.bootstrap_ignition.s3_endpoint_direct, "https://", "")
     BUCKET_NAME = ibm_cos_bucket.bootstrap_ignition.bucket_name
     OBJECT_NAME = ibm_cos_bucket_object.bootstrap_ignition.key
     IAM_TOKEN   = data.ibm_iam_auth_token.iam_token.iam_access_token

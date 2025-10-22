@@ -5,15 +5,16 @@ import (
 	"net"
 	"testing"
 
-	azsku "github.com/Azure/azure-sdk-for-go/profiles/2018-03-01/compute/mgmt/compute"
-	aznetwork "github.com/Azure/azure-sdk-for-go/profiles/2018-03-01/network/mgmt/network"
 	azres "github.com/Azure/azure-sdk-for-go/profiles/2018-03-01/resources/mgmt/resources"
 	azsubs "github.com/Azure/azure-sdk-for-go/profiles/2018-03-01/resources/mgmt/subscriptions"
+	aznetwork "github.com/Azure/azure-sdk-for-go/profiles/2020-09-01/network/mgmt/network"
 	azenc "github.com/Azure/azure-sdk-for-go/profiles/latest/compute/mgmt/compute"
 	"github.com/Azure/go-autorest/autorest/to"
-	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
+	"go.uber.org/mock/gomock"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/validation/field"
+	"sigs.k8s.io/cluster-api-provider-azure/api/v1beta1"
 
 	"github.com/openshift/installer/pkg/asset/installconfig/azure/mock"
 	"github.com/openshift/installer/pkg/ipnet"
@@ -39,28 +40,31 @@ var (
 	validResourceSkuRegions        = "southeastasia"
 
 	vmCapabilities = map[string]map[string]string{
-		"Standard_D8s_v3":  {"vCPUsAvailable": "4", "MemoryGB": "16", "PremiumIO": "True", "HyperVGenerations": "V1,V2", "AcceleratedNetworkingEnabled": "True", "CpuArchitectureType": "x64"},
-		"Standard_D4s_v3":  {"vCPUsAvailable": "4", "MemoryGB": "32", "PremiumIO": "True", "HyperVGenerations": "V1", "AcceleratedNetworkingEnabled": "True", "CpuArchitectureType": "x64"},
-		"Standard_A1_v2":   {"vCPUsAvailable": "1", "MemoryGB": "2", "PremiumIO": "True", "HyperVGenerations": "V1,V2", "AcceleratedNetworkingEnabled": "False", "CpuArchitectureType": "x64"},
-		"Standard_D2_v4":   {"vCPUsAvailable": "2", "MemoryGB": "8", "PremiumIO": "True", "HyperVGenerations": "V1,V2", "AcceleratedNetworkingEnabled": "True", "CpuArchitectureType": "x64"},
-		"Standard_D4_v4":   {"vCPUsAvailable": "4", "MemoryGB": "16", "PremiumIO": "False", "HyperVGenerations": "V1,V2", "AcceleratedNetworkingEnabled": "True", "CpuArchitectureType": "x64"},
-		"Standard_D2s_v3":  {"vCPUsAvailable": "4", "MemoryGB": "16", "PremiumIO": "True", "HyperVGenerations": "V1,V2", "AcceleratedNetworkingEnabled": "True", "CpuArchitectureType": "x64"},
-		"Standard_Dc4_v4":  {"vCPUsAvailable": "4", "MemoryGB": "16", "PremiumIO": "True", "HyperVGenerations": "V2", "CpuArchitectureType": "x64"},
-		"Standard_B4ms":    {"vCPUsAvailable": "4", "MemoryGB": "16", "PremiumIO": "True", "HyperVGenerations": "V1,V2", "AcceleratedNetworkingEnabled": "False", "CpuArchitectureType": "x64"},
-		"Standard_D8ps_v5": {"vCPUsAvailable": "8", "MemoryGB": "32", "PremiumIO": "True", "HyperVGenerations": "V2", "AcceleratedNetworkingEnabled": "True", "CpuArchitectureType": "Arm64"},
-		"Standard_D4ps_v5": {"vCPUsAvailable": "4", "MemoryGB": "16", "PremiumIO": "True", "HyperVGenerations": "V2", "AcceleratedNetworkingEnabled": "True", "CpuArchitectureType": "Arm64"},
+		"Standard_D8s_v3":    {"vCPUsAvailable": "4", "MemoryGB": "16", "PremiumIO": "True", "HyperVGenerations": "V1,V2", "AcceleratedNetworkingEnabled": "True", "CpuArchitectureType": "x64"},
+		"Standard_D4s_v3":    {"vCPUsAvailable": "4", "MemoryGB": "32", "PremiumIO": "True", "HyperVGenerations": "V1", "AcceleratedNetworkingEnabled": "True", "CpuArchitectureType": "x64"},
+		"Standard_A1_v2":     {"vCPUsAvailable": "1", "MemoryGB": "2", "PremiumIO": "True", "HyperVGenerations": "V1,V2", "AcceleratedNetworkingEnabled": "False", "CpuArchitectureType": "x64"},
+		"Standard_D2_v4":     {"vCPUsAvailable": "2", "MemoryGB": "8", "PremiumIO": "True", "HyperVGenerations": "V1,V2", "AcceleratedNetworkingEnabled": "True", "CpuArchitectureType": "x64"},
+		"Standard_D4_v4":     {"vCPUsAvailable": "4", "MemoryGB": "16", "PremiumIO": "False", "HyperVGenerations": "V1,V2", "AcceleratedNetworkingEnabled": "True", "CpuArchitectureType": "x64"},
+		"Standard_D2s_v3":    {"vCPUsAvailable": "4", "MemoryGB": "16", "PremiumIO": "True", "HyperVGenerations": "V1,V2", "AcceleratedNetworkingEnabled": "True", "CpuArchitectureType": "x64"},
+		"Standard_Dc4_v4":    {"vCPUsAvailable": "4", "MemoryGB": "16", "PremiumIO": "True", "HyperVGenerations": "V2", "CpuArchitectureType": "x64"},
+		"Standard_B4ms":      {"vCPUsAvailable": "4", "MemoryGB": "16", "PremiumIO": "True", "HyperVGenerations": "V1,V2", "AcceleratedNetworkingEnabled": "False", "CpuArchitectureType": "x64"},
+		"Standard_D8ps_v5":   {"vCPUsAvailable": "8", "MemoryGB": "32", "PremiumIO": "True", "HyperVGenerations": "V2", "AcceleratedNetworkingEnabled": "True", "CpuArchitectureType": "Arm64", "TrustedLaunchDisabled": "True"},
+		"Standard_D4ps_v5":   {"vCPUsAvailable": "4", "MemoryGB": "16", "PremiumIO": "True", "HyperVGenerations": "V2", "AcceleratedNetworkingEnabled": "True", "CpuArchitectureType": "Arm64", "TrustedLaunchDisabled": "True"},
+		"Standard_DC8ads_v5": {"vCPUsAvailable": "8", "MemoryGB": "32", "PremiumIO": "True", "HyperVGenerations": "V2", "AcceleratedNetworkingEnabled": "False", "CpuArchitectureType": "x64", "ConfidentialComputingType": "SNP"},
+		"Standard_DC8eds_v5": {"vCPUsAvailable": "8", "MemoryGB": "32", "PremiumIO": "True", "HyperVGenerations": "V2", "AcceleratedNetworkingEnabled": "False", "CpuArchitectureType": "x64", "ConfidentialComputingType": "TDX"},
+		"Standard_DC8s_v3":   {"vCPUsAvailable": "8", "MemoryGB": "32", "PremiumIO": "True", "HyperVGenerations": "V2", "AcceleratedNetworkingEnabled": "True", "CpuArchitectureType": "x64", "ConfidentialComputingType": "SGX"},
 	}
 
-	instanceTypeSku = func() []*azsku.ResourceSku {
-		instances := make([]*azsku.ResourceSku, 0, len(vmCapabilities))
+	instanceTypeSku = func() []*azenc.ResourceSku {
+		instances := make([]*azenc.ResourceSku, 0, len(vmCapabilities))
 		for typeName, capsMap := range vmCapabilities {
-			capabilities := make([]azsku.ResourceSkuCapabilities, 0, len(capsMap))
+			capabilities := make([]azenc.ResourceSkuCapabilities, 0, len(capsMap))
 			for name, value := range capsMap {
-				capabilities = append(capabilities, azsku.ResourceSkuCapabilities{
+				capabilities = append(capabilities, azenc.ResourceSkuCapabilities{
 					Name: to.StringPtr(name), Value: to.StringPtr(value),
 				})
 			}
-			instances = append(instances, &azsku.ResourceSku{
+			instances = append(instances, &azenc.ResourceSku{
 				Name: to.StringPtr(typeName), Capabilities: &capabilities,
 			})
 		}
@@ -115,6 +119,34 @@ var (
 		ic.Platform.Azure.DefaultMachinePlatform.InstanceType = "Standard_B4ms"
 	}
 
+	validConfidentialVMInstanceTypes = func(ic *types.InstallConfig) {
+		ic.Platform.Azure.DefaultMachinePlatform.InstanceType = "Standard_DC8ads_v5"
+	}
+
+	validConfidentialVMSNPInstanceTypes = func(ic *types.InstallConfig) {
+		ic.Platform.Azure.DefaultMachinePlatform.InstanceType = "Standard_DC8ads_v5"
+	}
+
+	validConfidentialVMTDXInstanceTypes = func(ic *types.InstallConfig) {
+		ic.Platform.Azure.DefaultMachinePlatform.InstanceType = "Standard_DC8eds_v5"
+	}
+
+	invalidConfidentialVMInstanceTypes = func(ic *types.InstallConfig) {
+		ic.Platform.Azure.DefaultMachinePlatform.InstanceType = "Standard_B4ms"
+	}
+
+	invalidConfidentialVMSGXInstanceTypes = func(ic *types.InstallConfig) {
+		ic.Platform.Azure.DefaultMachinePlatform.InstanceType = "Standard_DC8s_v3"
+	}
+
+	validTrustedLaunchInstanceTypes = func(ic *types.InstallConfig) {
+		ic.Platform.Azure.DefaultMachinePlatform.InstanceType = "Standard_D8s_v3"
+	}
+
+	invalidTrustedLaunchInstanceTypes = func(ic *types.InstallConfig) {
+		ic.Platform.Azure.DefaultMachinePlatform.InstanceType = "Standard_D8ps_v5"
+	}
+
 	invalidateMachineCIDR = func(ic *types.InstallConfig) {
 		_, newCidr, _ := net.ParseCIDR("192.168.111.0/24")
 		ic.MachineNetwork = []types.MachineNetworkEntry{
@@ -143,6 +175,25 @@ var (
 	vmNetworkingTypeAcceleratedControlPlane = func(ic *types.InstallConfig) { ic.ControlPlane.Platform.Azure.VMNetworkingType = "Accelerated" }
 	vmNetworkingTypeAcceleratedCompute      = func(ic *types.InstallConfig) { ic.Compute[0].Platform.Azure.VMNetworkingType = "Accelerated" }
 	vmNetworkingTypeAcceleratedDefault      = func(ic *types.InstallConfig) { ic.Azure.DefaultMachinePlatform.VMNetworkingType = "Accelerated" }
+
+	securityTypeConfidentialVMDefaultMachinePlatform = func(ic *types.InstallConfig) {
+		ic.Azure.DefaultMachinePlatform.Settings = &azure.SecuritySettings{SecurityType: "ConfidentialVM"}
+	}
+	securityTypeConfidentialVMControlPlane = func(ic *types.InstallConfig) {
+		ic.ControlPlane.Platform.Azure.Settings = &azure.SecuritySettings{SecurityType: "ConfidentialVM"}
+	}
+	securityTypeConfidentialVMCompute = func(ic *types.InstallConfig) {
+		ic.Compute[0].Platform.Azure.Settings = &azure.SecuritySettings{SecurityType: "ConfidentialVM"}
+	}
+	securityTypeTrustedLaunchDefaultMachinePlatform = func(ic *types.InstallConfig) {
+		ic.Azure.DefaultMachinePlatform.Settings = &azure.SecuritySettings{SecurityType: "TrustedLaunch"}
+	}
+	securityTypeTrustedLaunchControlPlane = func(ic *types.InstallConfig) {
+		ic.ControlPlane.Platform.Azure.Settings = &azure.SecuritySettings{SecurityType: "TrustedLaunch"}
+	}
+	securityTypeTrustedLaunchCompute = func(ic *types.InstallConfig) {
+		ic.Compute[0].Platform.Azure.Settings = &azure.SecuritySettings{SecurityType: "TrustedLaunch"}
+	}
 
 	virtualNetworkAPIResult = &aznetwork.VirtualNetwork{
 		Name: &validVirtualNetwork,
@@ -174,6 +225,14 @@ var (
 		Name: to.StringPtr("VMImage"),
 		VirtualMachineImageProperties: &azenc.VirtualMachineImageProperties{
 			HyperVGeneration: azenc.HyperVGenerationTypesV1,
+			Plan:             &azenc.PurchasePlan{},
+		},
+	}
+
+	marketplaceImageAPIResultNoPlan = azenc.VirtualMachineImage{
+		Name: to.StringPtr("VMImage"),
+		VirtualMachineImageProperties: &azenc.VirtualMachineImageProperties{
+			HyperVGeneration: azenc.HyperVGenerationTypesV1,
 		},
 	}
 
@@ -197,6 +256,13 @@ var (
 		Type:     to.StringPtr(diskEncryptionSetType),
 		Location: to.StringPtr(diskEncryptionSetLocation),
 	}
+	validConfidentialVMDiskEncryptionSetResult = &azenc.DiskEncryptionSet{
+		ID:                      to.StringPtr(diskEncryptionSetID),
+		Name:                    to.StringPtr(diskEncryptionSetName),
+		Type:                    to.StringPtr(diskEncryptionSetType),
+		Location:                to.StringPtr(diskEncryptionSetLocation),
+		EncryptionSetProperties: &azenc.EncryptionSetProperties{EncryptionType: azenc.ConfidentialVMEncryptedWithCustomerKey},
+	}
 
 	validDiskEncryptionSetSubscriptionID = "test-encryption-set-subscription-id"
 	validDiskEncryptionSetResourceGroup  = "test-encryption-set-resource-group"
@@ -206,6 +272,14 @@ var (
 			SubscriptionID: validDiskEncryptionSetSubscriptionID,
 			ResourceGroup:  validDiskEncryptionSetResourceGroup,
 			Name:           validDiskEncryptionSetName,
+		}
+	}
+	validConfidentialVMDiskEncryptionSetName   = "test-confidential-vm-encryption-set-name"
+	validConfidentialVMDiskEncryptionSetConfig = func() *azure.DiskEncryptionSet {
+		return &azure.DiskEncryptionSet{
+			SubscriptionID: validDiskEncryptionSetSubscriptionID,
+			ResourceGroup:  validDiskEncryptionSetResourceGroup,
+			Name:           validConfidentialVMDiskEncryptionSetName,
 		}
 	}
 	invalidDiskEncryptionSetName   = "test-encryption-set-invalid-name"
@@ -221,8 +295,9 @@ var (
 	validOSImageOffer                = "test-offer"
 	validOSImageSKU                  = "test-sku"
 	validOSImageVersion              = "test-version"
+	noPlanOSImageSKU                 = "no-plan-sku"
 	invalidOSImageSKU                = "bad-sku"
-	erroringOSImageSKU               = "test-sku-gen1"
+	erroringOSImageSKU               = "test-sku-gen2"
 	erroringLicenseTermsOSImageSKU   = "erroring-license-terms"
 	unacceptedLicenseTermsOSImageSKU = "unaccepted-license-terms"
 	validOSImage                     = azure.OSImage{
@@ -251,6 +326,34 @@ var (
 		ic.Compute[0].Platform.Azure.OSDisk.DiskEncryptionSet = invalidDiskEncryptionSetConfig()
 	}
 
+	validConfidentialVMDiskEncryptionSetDefaultMachinePlatform = func(ic *types.InstallConfig) {
+		ic.Azure.DefaultMachinePlatform.OSDisk.SecurityProfile = &azure.VMDiskSecurityProfile{DiskEncryptionSet: validConfidentialVMDiskEncryptionSetConfig()}
+	}
+	validConfidentialVMDiskEncryptionSetControlPlane = func(ic *types.InstallConfig) {
+		ic.ControlPlane.Platform.Azure.OSDisk.SecurityProfile = &azure.VMDiskSecurityProfile{DiskEncryptionSet: validConfidentialVMDiskEncryptionSetConfig()}
+	}
+	validConfidentialVMDiskEncryptionSetCompute = func(ic *types.InstallConfig) {
+		ic.Compute[0].Platform.Azure.OSDisk.SecurityProfile = &azure.VMDiskSecurityProfile{DiskEncryptionSet: validConfidentialVMDiskEncryptionSetConfig()}
+	}
+	invalidConfidentialVMDiskEncryptionSetDefaultMachinePlatform = func(ic *types.InstallConfig) {
+		ic.Azure.DefaultMachinePlatform.OSDisk.SecurityProfile = &azure.VMDiskSecurityProfile{DiskEncryptionSet: invalidDiskEncryptionSetConfig()}
+	}
+	invalidConfidentialVMDiskEncryptionSetControlPlane = func(ic *types.InstallConfig) {
+		ic.ControlPlane.Platform.Azure.OSDisk.SecurityProfile = &azure.VMDiskSecurityProfile{DiskEncryptionSet: invalidDiskEncryptionSetConfig()}
+	}
+	invalidConfidentialVMDiskEncryptionSetCompute = func(ic *types.InstallConfig) {
+		ic.Compute[0].Platform.Azure.OSDisk.SecurityProfile = &azure.VMDiskSecurityProfile{DiskEncryptionSet: invalidDiskEncryptionSetConfig()}
+	}
+	invalidTypeConfidentialVMDiskEncryptionSetDefaultMachinePlatform = func(ic *types.InstallConfig) {
+		ic.Azure.DefaultMachinePlatform.OSDisk.SecurityProfile = &azure.VMDiskSecurityProfile{DiskEncryptionSet: validDiskEncryptionSetConfig()}
+	}
+	invalidTypeConfidentialVMDiskEncryptionSetControlPlane = func(ic *types.InstallConfig) {
+		ic.ControlPlane.Platform.Azure.OSDisk.SecurityProfile = &azure.VMDiskSecurityProfile{DiskEncryptionSet: validDiskEncryptionSetConfig()}
+	}
+	invalidTypeConfidentialVMDiskEncryptionSetCompute = func(ic *types.InstallConfig) {
+		ic.Compute[0].Platform.Azure.OSDisk.SecurityProfile = &azure.VMDiskSecurityProfile{DiskEncryptionSet: validDiskEncryptionSetConfig()}
+	}
+
 	validOSImageCompute = func(ic *types.InstallConfig) {
 		ic.Compute[0].Platform.Azure.OSImage = validOSImage
 	}
@@ -269,6 +372,15 @@ var (
 	erroringGenerationOsImageCompute = func(ic *types.InstallConfig) {
 		validOSImageCompute(ic)
 		ic.Compute[0].Platform.Azure.OSImage.SKU = erroringOSImageSKU
+	}
+	validBootDiagnosticsStorageAccount = "validstorageaccount"
+	validBootDiagnosticsResourceGroup  = "valid-resource-group"
+	validStorageAccountValues          = func(ic *types.InstallConfig) {
+		ic.ControlPlane.Platform.Azure.BootDiagnostics = &azure.BootDiagnostics{
+			Type:               v1beta1.UserManagedDiagnosticsStorage,
+			ResourceGroup:      validBootDiagnosticsResourceGroup,
+			StorageAccountName: validBootDiagnosticsStorageAccount,
+		}
 	}
 )
 
@@ -373,7 +485,7 @@ func TestAzureInstallConfigValidation(t *testing.T) {
 		{
 			name:     "Undefined default instance types",
 			edits:    editFunctions{undefinedDefaultInstanceTypes},
-			errorMsg: `\[controlPlane.platform.azure.type: Invalid value: "Dne_D2_v4": not found in region centralus, compute\[0\].platform.azure.type: Invalid value: "Dne_D2_v4": not found in region centralus\]`,
+			errorMsg: `\[controlPlane.platform.azure.type: Invalid value: "Dne_D2_v4": not found in region centralus, compute\[0\].platform.azure.type: Invalid value: "Dne_D2_v4": not found in region centralus, controlPlane.platform.azure.type: Invalid value: "Dne_D2_v4": unable to determine HyperVGeneration version\]`,
 		},
 		{
 			name:     "Invalid compute instance types",
@@ -421,28 +533,69 @@ func TestAzureInstallConfigValidation(t *testing.T) {
 			errorMsg: `compute\[0\].platform.azure.vmNetworkingType: Invalid value: "Accelerated": vm networking type is not supported for instance type Standard_B4ms`,
 		},
 		{
-			name:  "Valid OS Image",
-			edits: editFunctions{validOSImageCompute},
+			name:     "Supported ConfidentialVM security type SNP",
+			edits:    editFunctions{validConfidentialVMSNPInstanceTypes, securityTypeConfidentialVMControlPlane},
+			errorMsg: "",
 		},
 		{
-			name:     "Invalid OS Image",
-			edits:    editFunctions{invalidOSImageCompute},
-			errorMsg: `compute\[0\].platform.azure.osImage: Invalid value: .*: not found`,
+			name:     "Supported ConfidentialVM security type TDX",
+			edits:    editFunctions{validConfidentialVMTDXInstanceTypes, securityTypeConfidentialVMControlPlane},
+			errorMsg: "",
 		},
 		{
-			name:     "OS Image causing error determining license terms",
-			edits:    editFunctions{erroringLicenseTermsOSImageCompute},
-			errorMsg: `compute\[0\].platform.azure.osImage: Invalid value: .*: could not determine if the license terms for the marketplace image have been accepted: error`,
+			name:     "Unsupported ConfidentialVM security type in control plane",
+			edits:    editFunctions{invalidConfidentialVMInstanceTypes, securityTypeConfidentialVMControlPlane},
+			errorMsg: `controlPlane.platform.azure.settings.securityType: Invalid value: "ConfidentialVM": this security type is not supported for instance type Standard_B4ms`,
 		},
 		{
-			name:     "OS Image with unaccepted license terms",
-			edits:    editFunctions{unacceptedLicenseTermsOSImageCompute},
-			errorMsg: `compute\[0\].platform.azure.osImage: Invalid value: .*: the license terms for the marketplace image have not been accepted`,
+			name:     "Unsupported ConfidentialVM security type in control plane",
+			edits:    editFunctions{invalidConfidentialVMSGXInstanceTypes, securityTypeConfidentialVMControlPlane},
+			errorMsg: `controlPlane.platform.azure.settings.securityType: Invalid value: "ConfidentialVM": this security type is not supported for instance type Standard_DC8s_v3`,
 		},
 		{
-			name:     "OS Image with wrong HyperV generation",
-			edits:    editFunctions{erroringGenerationOsImageCompute},
-			errorMsg: `compute\[0\].platform.azure.osImage: Invalid value: .* supports HyperVGenerations \[(V[12])\] but the specified image is for HyperVGeneration [^\\1].*`,
+			name:     "Unsupported ConfidentialVM security type in compute",
+			edits:    editFunctions{invalidConfidentialVMInstanceTypes, securityTypeConfidentialVMCompute},
+			errorMsg: `compute\[0\].platform.azure.settings.securityType: Invalid value: "ConfidentialVM": this security type is not supported for instance type Standard_B4ms`,
+		},
+		{
+			name:     "Unsupported ConfidentialVM security type in compute for SGX instance type",
+			edits:    editFunctions{invalidConfidentialVMSGXInstanceTypes, securityTypeConfidentialVMCompute},
+			errorMsg: `compute\[0\].platform.azure.settings.securityType: Invalid value: "ConfidentialVM": this security type is not supported for instance type Standard_DC8s_v3`,
+		},
+		{
+			name:     "Unsupported ConfidentialVM security type in default machine platform",
+			edits:    editFunctions{invalidConfidentialVMInstanceTypes, securityTypeConfidentialVMDefaultMachinePlatform},
+			errorMsg: `[compute\[0\].platform.azure.settings.securityType: Invalid value: "ConfidentialVM": this security type is not supported for instance type Standard_B4ms,controlPlane.platform.azure.settings.securityType: Invalid valud: "ConfidentialVM": this security type is not supported for instance type Standard_B4ms]`,
+		},
+		{
+			name:     "Supported TrustedLaunch security type",
+			edits:    editFunctions{validTrustedLaunchInstanceTypes, securityTypeTrustedLaunchControlPlane},
+			errorMsg: "",
+		},
+		{
+			name:     "Unsupported TrustedLaunch security type in control plane",
+			edits:    editFunctions{validArm64InstanceTypes, invalidTrustedLaunchInstanceTypes, securityTypeTrustedLaunchControlPlane},
+			errorMsg: `controlPlane.platform.azure.settings.securityType: Invalid value: "TrustedLaunch": this security type is not supported for instance type Standard_D8ps_v5`,
+		},
+		{
+			name:     "Unsupported TrustedLaunch security type in compute",
+			edits:    editFunctions{validArm64InstanceTypes, invalidTrustedLaunchInstanceTypes, securityTypeTrustedLaunchCompute},
+			errorMsg: `compute\[0\].platform.azure.settings.securityType: Invalid value: "TrustedLaunch": this security type is not supported for instance type Standard_D4ps_v5`,
+		},
+		{
+			name:     "Unsupported TrustedLaunch security type for Confindential VM size in compute",
+			edits:    editFunctions{validConfidentialVMInstanceTypes, securityTypeTrustedLaunchCompute},
+			errorMsg: `compute\[0\].platform.azure.settings.securityType: Invalid value: "TrustedLaunch": this security type is not supported for instance type Standard_DC8ads_v5`,
+		},
+		{
+			name:     "Unsupported TrustedLaunch security type in default machine platform",
+			edits:    editFunctions{validArm64InstanceTypes, invalidTrustedLaunchInstanceTypes, securityTypeTrustedLaunchDefaultMachinePlatform},
+			errorMsg: `[compute\[0\].platform.azure.settings.securityType: Invalid value: "TrustedLaunch": this security type is not supported for instance type Standard_D4ps_v5,controlPlane.platform.azure.settings.securityType: Invalid valud: "ConfidentialVM": this security type is not supported for instance type Standard_D4ps_v5]`,
+		},
+		{
+			name:     "BootDiagnostics type user managed and valid storage account values",
+			edits:    editFunctions{validStorageAccountValues},
+			errorMsg: "",
 		},
 	}
 
@@ -490,27 +643,11 @@ func TestAzureInstallConfigValidation(t *testing.T) {
 	azureClient.EXPECT().GetDiskSkus(gomock.Any(), validResourceSkuRegions).Return(nil, fmt.Errorf("invalid disk type")).AnyTimes()
 	azureClient.EXPECT().GetDiskSkus(gomock.Any(), invalidResourceSkuRegion).Return(nil, fmt.Errorf("invalid region")).AnyTimes()
 
-	// OS Images
-	azureClient.EXPECT().GetMarketplaceImage(gomock.Any(), validRegion, validOSImagePublisher, validOSImageOffer, validOSImageSKU, validOSImageVersion).Return(marketplaceImageAPIResult, nil).AnyTimes()
-	azureClient.EXPECT().AreMarketplaceImageTermsAccepted(gomock.Any(), validOSImagePublisher, validOSImageOffer, validOSImageSKU).Return(true, nil).AnyTimes()
-	azureClient.EXPECT().GetMarketplaceImage(gomock.Any(), validRegion, validOSImagePublisher, validOSImageOffer, invalidOSImageSKU, validOSImageVersion).Return(marketplaceImageAPIResult, fmt.Errorf("not found")).AnyTimes()
-	azureClient.EXPECT().GetMarketplaceImage(gomock.Any(), validRegion, validOSImagePublisher, validOSImageOffer, erroringLicenseTermsOSImageSKU, validOSImageVersion).Return(marketplaceImageAPIResult, nil).AnyTimes()
-	azureClient.EXPECT().AreMarketplaceImageTermsAccepted(gomock.Any(), validOSImagePublisher, validOSImageOffer, erroringLicenseTermsOSImageSKU).Return(false, fmt.Errorf("error")).AnyTimes()
-	azureClient.EXPECT().GetMarketplaceImage(gomock.Any(), validRegion, validOSImagePublisher, validOSImageOffer, unacceptedLicenseTermsOSImageSKU, validOSImageVersion).Return(marketplaceImageAPIResult, nil).AnyTimes()
-	azureClient.EXPECT().AreMarketplaceImageTermsAccepted(gomock.Any(), validOSImagePublisher, validOSImageOffer, unacceptedLicenseTermsOSImageSKU).Return(false, nil).AnyTimes()
-	azureClient.EXPECT().GetMarketplaceImage(gomock.Any(), validRegion, validOSImagePublisher, validOSImageOffer, erroringOSImageSKU, validOSImageVersion).Return(azenc.VirtualMachineImage{
-		VirtualMachineImageProperties: &azenc.VirtualMachineImageProperties{
-			HyperVGeneration: azenc.HyperVGenerationTypesV2,
-		},
-	}, nil).AnyTimes()
-
-	// HyperVGenerations
-	azureClient.EXPECT().GetHyperVGenerationVersion(gomock.Any(), gomock.Any(), gomock.Any(), "V1").Return("", fmt.Errorf("instance type Standard_D8s_v3 supports HyperVGenerations [V2] but the specified image is for HyperVGeneration V1; to correct this issue either specify a compatible instance type or change the HyperVGeneration for the image by using a different SKU")).AnyTimes()
-	azureClient.EXPECT().GetHyperVGenerationVersion(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return("V2", nil).AnyTimes()
-
 	azureClient.EXPECT().GetAvailabilityZones(gomock.Any(), gomock.Any(), gomock.Any()).Return([]string{"1", "2", "3"}, nil).AnyTimes()
 
 	azureClient.EXPECT().GetVirtualMachineFamily(gomock.Any(), gomock.Any(), gomock.Any()).Return("", nil).AnyTimes()
+
+	azureClient.EXPECT().CheckIfExistsStorageAccount(gomock.Any(), validBootDiagnosticsResourceGroup, validBootDiagnosticsStorageAccount, validRegion).Return(nil)
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -575,10 +712,7 @@ func Test_validateResourceGroup(t *testing.T) {
 		err:       `^\Qplatform.azure.resourceGroupName: Invalid value: "valid-resource-group-conf-tags": resource group has conflicting tags kubernetes.io_cluster.test-cluster-12345\E$`,
 	}, {
 		groupName: "valid-resource-group-with-resources",
-		// ARO provisions Azure resources before resolving the asset graph,
-		// so there will always be resources in its resource group.
-		wantSkip: (&azure.Platform{}).IsARO(),
-		err:      `^\Qplatform.azure.resourceGroupName: Invalid value: "valid-resource-group-with-resources": resource group must be empty but it has 3 resources like id1, id2 ...\E$`,
+		err:       `^\Qplatform.azure.resourceGroupName: Invalid value: "valid-resource-group-with-resources": resource group must be empty but it has 3 resources like id1, id2 ...\E$`,
 	}}
 
 	mockCtrl := gomock.NewController(t)
@@ -713,6 +847,86 @@ func TestAzureDiskEncryptionSet(t *testing.T) {
 			}
 
 			errors := ValidateDiskEncryptionSet(azureClient, editedInstallConfig)
+			aggregatedErrors := errors.ToAggregate()
+			if tc.errorMsg != "" {
+				assert.Regexp(t, tc.errorMsg, aggregatedErrors)
+			} else {
+				assert.NoError(t, aggregatedErrors)
+			}
+		})
+	}
+}
+
+func TestAzureSecurityProfileDiskEncryptionSet(t *testing.T) {
+	cases := []struct {
+		name     string
+		edits    editFunctions
+		errorMsg string
+	}{
+		{
+			name:     "Valid security profile disk encryption set for default pool",
+			edits:    editFunctions{validConfidentialVMDiskEncryptionSetDefaultMachinePlatform},
+			errorMsg: "",
+		},
+		{
+			name:     "Invalid security profile disk encryption set not found for default pool",
+			edits:    editFunctions{invalidConfidentialVMDiskEncryptionSetDefaultMachinePlatform},
+			errorMsg: fmt.Sprintf(`^platform.azure.defaultMachinePlatform.osDisk.securityProfile.diskEncryptionSet: Invalid value: azure.DiskEncryptionSet{SubscriptionID:"%s", ResourceGroup:"%s", Name:"%s"}: failed to get disk encryption set$`, validDiskEncryptionSetSubscriptionID, validDiskEncryptionSetResourceGroup, invalidDiskEncryptionSetName),
+		},
+		{
+			name:     "Invalid security profile disk encryption set with default encryption type for default pool",
+			edits:    editFunctions{invalidTypeConfidentialVMDiskEncryptionSetDefaultMachinePlatform},
+			errorMsg: fmt.Sprintf(`^platform.azure.defaultMachinePlatform.osDisk.securityProfile.diskEncryptionSet: Invalid value: azure.DiskEncryptionSet{SubscriptionID:"%s", ResourceGroup:"%s", Name:"%s"}: the disk encryption set should be created with type %s$`, validDiskEncryptionSetSubscriptionID, validDiskEncryptionSetResourceGroup, validDiskEncryptionSetName, azenc.ConfidentialVMEncryptedWithCustomerKey),
+		},
+		{
+			name:     "Valid security profile disk encryption set for control-plane",
+			edits:    editFunctions{validConfidentialVMDiskEncryptionSetControlPlane},
+			errorMsg: "",
+		},
+		{
+			name:     "Invalid security profile disk encryption set not found for control-plane",
+			edits:    editFunctions{invalidConfidentialVMDiskEncryptionSetControlPlane},
+			errorMsg: fmt.Sprintf(`^platform.azure.osDisk.securityProfile.diskEncryptionSet: Invalid value: azure.DiskEncryptionSet{SubscriptionID:"%s", ResourceGroup:"%s", Name:"%s"}: failed to get disk encryption set$`, validDiskEncryptionSetSubscriptionID, validDiskEncryptionSetResourceGroup, invalidDiskEncryptionSetName),
+		},
+		{
+			name:     "Invalid security profile disk encryption set with default encryption type for control-plane",
+			edits:    editFunctions{invalidTypeConfidentialVMDiskEncryptionSetControlPlane},
+			errorMsg: fmt.Sprintf(`^platform.azure.osDisk.securityProfile.diskEncryptionSet: Invalid value: azure.DiskEncryptionSet{SubscriptionID:"%s", ResourceGroup:"%s", Name:"%s"}: the disk encryption set should be created with type %s$`, validDiskEncryptionSetSubscriptionID, validDiskEncryptionSetResourceGroup, validDiskEncryptionSetName, azenc.ConfidentialVMEncryptedWithCustomerKey),
+		},
+		{
+			name:     "Valid security profile disk encryption set for compute",
+			edits:    editFunctions{validConfidentialVMDiskEncryptionSetCompute},
+			errorMsg: "",
+		},
+		{
+			name:     "Invalid security profile disk encryption set not found for compute",
+			edits:    editFunctions{invalidConfidentialVMDiskEncryptionSetCompute},
+			errorMsg: fmt.Sprintf(`^compute\[0\].platform.azure.osDisk.securityProfile.diskEncryptionSet: Invalid value: azure.DiskEncryptionSet{SubscriptionID:"%s", ResourceGroup:"%s", Name:"%s"}: failed to get disk encryption set$`, validDiskEncryptionSetSubscriptionID, validDiskEncryptionSetResourceGroup, invalidDiskEncryptionSetName),
+		},
+		{
+			name:     "Invalid security profile disk encryption set with default encryption type for compute",
+			edits:    editFunctions{invalidTypeConfidentialVMDiskEncryptionSetCompute},
+			errorMsg: fmt.Sprintf(`^compute\[0\].platform.azure.osDisk.securityProfile.diskEncryptionSet: Invalid value: azure.DiskEncryptionSet{SubscriptionID:"%s", ResourceGroup:"%s", Name:"%s"}: the disk encryption set should be created with type %s$`, validDiskEncryptionSetSubscriptionID, validDiskEncryptionSetResourceGroup, validDiskEncryptionSetName, azenc.ConfidentialVMEncryptedWithCustomerKey),
+		},
+	}
+
+	mockCtrl := gomock.NewController(t)
+	defer mockCtrl.Finish()
+
+	azureClient := mock.NewMockAPI(mockCtrl)
+
+	azureClient.EXPECT().GetDiskEncryptionSet(gomock.Any(), validDiskEncryptionSetSubscriptionID, validDiskEncryptionSetResourceGroup, validConfidentialVMDiskEncryptionSetName).Return(validConfidentialVMDiskEncryptionSetResult, nil).AnyTimes()
+	azureClient.EXPECT().GetDiskEncryptionSet(gomock.Any(), validDiskEncryptionSetSubscriptionID, validDiskEncryptionSetResourceGroup, validDiskEncryptionSetName).Return(validDiskEncryptionSetResult, nil).AnyTimes()
+	azureClient.EXPECT().GetDiskEncryptionSet(gomock.Any(), validDiskEncryptionSetSubscriptionID, validDiskEncryptionSetResourceGroup, invalidDiskEncryptionSetName).Return(nil, fmt.Errorf("failed to get disk encryption set")).AnyTimes()
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			editedInstallConfig := validInstallConfig()
+			for _, edit := range tc.edits {
+				edit(editedInstallConfig)
+			}
+
+			errors := ValidateSecurityProfileDiskEncryptionSet(azureClient, editedInstallConfig)
 			aggregatedErrors := errors.ToAggregate()
 			if tc.errorMsg != "" {
 				assert.Regexp(t, tc.errorMsg, aggregatedErrors)
@@ -1003,6 +1217,402 @@ func TestAzureUltraSSDCapability(t *testing.T) {
 				assert.Regexp(t, tc.errorMsg, aggregatedErrors)
 			} else {
 				assert.NoError(t, aggregatedErrors)
+			}
+		})
+	}
+}
+
+func TestAzureMarketplaceImage(t *testing.T) {
+	validOSImageNoPlan := azure.OSImage{
+		Plan:      azure.ImageNoPurchasePlan,
+		Publisher: validOSImagePublisher,
+		SKU:       noPlanOSImageSKU,
+		Version:   validOSImageVersion,
+		Offer:     validOSImageOffer,
+	}
+
+	invalidOSImage := azure.OSImage{
+		Publisher: validOSImagePublisher,
+		SKU:       invalidOSImageSKU,
+		Version:   validOSImageVersion,
+		Offer:     validOSImageOffer,
+	}
+
+	allHyperVGens := sets.New("V1", "V2")
+
+	cases := []struct {
+		name       string
+		osImage    *azure.OSImage
+		hyperVGens sets.Set[string]
+		errorMsg   string
+	}{
+		{
+			name:       "Valid OS Image",
+			osImage:    &validOSImage,
+			hyperVGens: allHyperVGens,
+			errorMsg:   "",
+		},
+		{
+			name:       "Valid OS Image no purchase plan",
+			osImage:    &validOSImageNoPlan,
+			hyperVGens: allHyperVGens,
+			errorMsg:   "",
+		},
+		{
+			name:       "Invalid OS Image",
+			osImage:    &invalidOSImage,
+			hyperVGens: allHyperVGens,
+			errorMsg:   `compute\[0\].platform.azure.osImage: Invalid value: .*: not found`,
+		},
+		{
+			name: "OS Image causing error determining license terms",
+			osImage: &azure.OSImage{
+				Publisher: validOSImagePublisher,
+				SKU:       erroringLicenseTermsOSImageSKU,
+				Offer:     validOSImageOffer,
+				Version:   validOSImageVersion,
+			},
+			hyperVGens: allHyperVGens,
+			errorMsg:   `compute\[0\].platform.azure.osImage: Invalid value: .*: could not determine if the license terms for the marketplace image have been accepted: error`,
+		},
+		{
+			name: "OS Image with unaccepted license terms",
+			osImage: &azure.OSImage{
+				Publisher: validOSImagePublisher,
+				SKU:       unacceptedLicenseTermsOSImageSKU,
+				Offer:     validOSImageOffer,
+				Version:   validOSImageVersion,
+			},
+			hyperVGens: allHyperVGens,
+			errorMsg:   `compute\[0\].platform.azure.osImage: Invalid value: .*: the license terms for the marketplace image have not been accepted`,
+		},
+		{
+			name: "OS Image with wrong HyperV generation",
+			osImage: &azure.OSImage{
+				Publisher: validOSImagePublisher,
+				SKU:       erroringOSImageSKU,
+				Offer:     validOSImageOffer,
+				Version:   validOSImageVersion,
+			},
+			hyperVGens: sets.New("V1"),
+			errorMsg:   `compute\[0\].platform.azure.osImage: Invalid value: .*: instance type supports HyperVGenerations \[(V[12])\] but the specified image is for HyperVGeneration [^\\1].*$`,
+		},
+	}
+
+	mockCtrl := gomock.NewController(t)
+	defer mockCtrl.Finish()
+
+	azureClient := mock.NewMockAPI(mockCtrl)
+
+	// OS Images
+	azureClient.EXPECT().GetMarketplaceImage(gomock.Any(), validRegion, validOSImagePublisher, validOSImageOffer, validOSImageSKU, validOSImageVersion).Return(marketplaceImageAPIResult, nil).AnyTimes()
+	azureClient.EXPECT().AreMarketplaceImageTermsAccepted(gomock.Any(), validOSImagePublisher, validOSImageOffer, validOSImageSKU).Return(true, nil).AnyTimes()
+	azureClient.EXPECT().GetMarketplaceImage(gomock.Any(), validRegion, validOSImagePublisher, validOSImageOffer, invalidOSImageSKU, validOSImageVersion).Return(marketplaceImageAPIResult, fmt.Errorf("not found")).AnyTimes()
+	azureClient.EXPECT().GetMarketplaceImage(gomock.Any(), validRegion, validOSImagePublisher, validOSImageOffer, erroringLicenseTermsOSImageSKU, validOSImageVersion).Return(marketplaceImageAPIResult, nil).AnyTimes()
+	azureClient.EXPECT().AreMarketplaceImageTermsAccepted(gomock.Any(), validOSImagePublisher, validOSImageOffer, erroringLicenseTermsOSImageSKU).Return(false, fmt.Errorf("error")).AnyTimes()
+	azureClient.EXPECT().GetMarketplaceImage(gomock.Any(), validRegion, validOSImagePublisher, validOSImageOffer, unacceptedLicenseTermsOSImageSKU, validOSImageVersion).Return(marketplaceImageAPIResult, nil).AnyTimes()
+	azureClient.EXPECT().AreMarketplaceImageTermsAccepted(gomock.Any(), validOSImagePublisher, validOSImageOffer, unacceptedLicenseTermsOSImageSKU).Return(false, nil).AnyTimes()
+	azureClient.EXPECT().GetMarketplaceImage(gomock.Any(), validRegion, validOSImagePublisher, validOSImageOffer, erroringOSImageSKU, validOSImageVersion).Return(azenc.VirtualMachineImage{
+		VirtualMachineImageProperties: &azenc.VirtualMachineImageProperties{
+			HyperVGeneration: azenc.HyperVGenerationTypesV2,
+		},
+	}, nil).AnyTimes()
+	azureClient.EXPECT().AreMarketplaceImageTermsAccepted(gomock.Any(), validOSImagePublisher, validOSImageOffer, erroringOSImageSKU).Return(true, nil).AnyTimes()
+	azureClient.EXPECT().GetMarketplaceImage(gomock.Any(), validRegion, validOSImagePublisher, validOSImageOffer, noPlanOSImageSKU, validOSImageVersion).Return(marketplaceImageAPIResultNoPlan, nil).AnyTimes()
+	// Should not check terms of images with no purchase plan
+	azureClient.EXPECT().AreMarketplaceImageTermsAccepted(gomock.Any(), validOSImagePublisher, validOSImageOffer, noPlanOSImageSKU).MaxTimes(0)
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateMarketplaceImage(azureClient, validRegion, tc.hyperVGens, tc.osImage, field.NewPath("compute").Index(0))
+			if tc.errorMsg != "" {
+				assert.Regexp(t, tc.errorMsg, err)
+			} else {
+				assert.Nil(t, err)
+			}
+		})
+	}
+}
+
+func TestAzureMarketplaceImages(t *testing.T) {
+	defaultMachineInstanceTypeHyperVGen1 := func(ic *types.InstallConfig) {
+		ic.Azure.DefaultMachinePlatform.InstanceType = "Standard_D4s_v3"
+	}
+
+	validOSImageDefaultMachine := func(ic *types.InstallConfig) {
+		ic.Azure.DefaultMachinePlatform.OSImage = validOSImage
+	}
+	invalidOSImageDefaultMachine := func(ic *types.InstallConfig) {
+		validOSImageDefaultMachine(ic)
+		ic.Azure.DefaultMachinePlatform.OSImage.SKU = invalidOSImageSKU
+	}
+	erroringLicenseTermsOSImageDefaultMachine := func(ic *types.InstallConfig) {
+		validOSImageDefaultMachine(ic)
+		ic.Azure.DefaultMachinePlatform.OSImage.SKU = erroringLicenseTermsOSImageSKU
+	}
+	unacceptedLicenseTermsOSImageDefaultMachine := func(ic *types.InstallConfig) {
+		validOSImageDefaultMachine(ic)
+		ic.Azure.DefaultMachinePlatform.OSImage.SKU = unacceptedLicenseTermsOSImageSKU
+	}
+	erroringGenerationOsImageDefaultMachine := func(ic *types.InstallConfig) {
+		validOSImageDefaultMachine(ic)
+		ic.Azure.DefaultMachinePlatform.OSImage.SKU = erroringOSImageSKU
+	}
+
+	controlPlaneInstanceTypeHyperVGen1 := func(ic *types.InstallConfig) {
+		ic.ControlPlane.Platform.Azure.InstanceType = "Standard_D4s_v3"
+	}
+
+	validOSImageControlPlane := func(ic *types.InstallConfig) {
+		ic.ControlPlane.Platform.Azure.OSImage = validOSImage
+	}
+	invalidOSImageControlPlane := func(ic *types.InstallConfig) {
+		validOSImageControlPlane(ic)
+		ic.ControlPlane.Platform.Azure.OSImage.SKU = invalidOSImageSKU
+	}
+	erroringLicenseTermsOSImageControlPlane := func(ic *types.InstallConfig) {
+		validOSImageControlPlane(ic)
+		ic.ControlPlane.Platform.Azure.OSImage.SKU = erroringLicenseTermsOSImageSKU
+	}
+	unacceptedLicenseTermsOSImageControlPlane := func(ic *types.InstallConfig) {
+		validOSImageControlPlane(ic)
+		ic.ControlPlane.Platform.Azure.OSImage.SKU = unacceptedLicenseTermsOSImageSKU
+	}
+	erroringGenerationOsImageControlPlane := func(ic *types.InstallConfig) {
+		validOSImageControlPlane(ic)
+		ic.ControlPlane.Platform.Azure.OSImage.SKU = erroringOSImageSKU
+	}
+
+	cases := []struct {
+		name     string
+		edits    editFunctions
+		errorMsg string
+	}{
+		// Marketplace definition on compute nodes
+		{
+			name:  "Valid OS Image compute",
+			edits: editFunctions{validOSImageCompute, validInstanceTypes},
+		},
+		{
+			name:     "Invalid OS Image compute",
+			edits:    editFunctions{invalidOSImageCompute, validInstanceTypes},
+			errorMsg: `compute\[0\].platform.azure.osImage: Invalid value: .*: not found`,
+		},
+		{
+			name:     "OS Image causing error determining license terms for compute",
+			edits:    editFunctions{erroringLicenseTermsOSImageCompute, validInstanceTypes},
+			errorMsg: `compute\[0\].platform.azure.osImage: Invalid value: .*: could not determine if the license terms for the marketplace image have been accepted: error`,
+		},
+		{
+			name:     "OS Image with unaccepted license terms for compute",
+			edits:    editFunctions{unacceptedLicenseTermsOSImageCompute, validInstanceTypes},
+			errorMsg: `compute\[0\].platform.azure.osImage: Invalid value: .*: the license terms for the marketplace image have not been accepted`,
+		},
+		{
+			name:     "OS Image with wrong HyperV generation for compute",
+			edits:    editFunctions{erroringGenerationOsImageCompute, validInstanceTypes},
+			errorMsg: `compute\[0\].platform.azure.osImage: Invalid value: .*: instance type supports HyperVGenerations \[(V[12])\] but the specified image is for HyperVGeneration [^\\1].*`,
+		},
+		{
+			name:     "OS Image with wrong HyperV generation for compute from default MachinePool",
+			edits:    editFunctions{erroringGenerationOsImageDefaultMachine, validInstanceTypes},
+			errorMsg: `compute\[0\].platform.azure.osImage: Invalid value: .*: instance type supports HyperVGenerations \[(V[12])\] but the specified image is for HyperVGeneration [^\\1].*`,
+		},
+		{
+			name:     "OS Image with wrong HyperV generation for inherited instance type for compute",
+			edits:    editFunctions{erroringGenerationOsImageCompute, defaultMachineInstanceTypeHyperVGen1},
+			errorMsg: `compute\[0\].platform.azure.osImage: Invalid value: .*: instance type supports HyperVGenerations \[(V[12])\] but the specified image is for HyperVGeneration [^\\1].*`,
+		},
+		// Marketplace definition for ControlPlane nodes
+		{
+			name:  "Valid OS Image controlPlane",
+			edits: editFunctions{validOSImageControlPlane, validInstanceTypes},
+		},
+		{
+			name:     "Invalid OS Image controlPlane",
+			edits:    editFunctions{invalidOSImageControlPlane, validOSImageCompute, validInstanceTypes},
+			errorMsg: `controlPlane.platform.azure.osImage: Invalid value: .*: not found`,
+		},
+		{
+			name:     "Invalid OS Image controlPlane from default MachinePool",
+			edits:    editFunctions{invalidOSImageDefaultMachine, validOSImageCompute, validInstanceTypes},
+			errorMsg: `controlPlane.platform.azure.osImage: Invalid value: .*: not found`,
+		},
+		{
+			name:     "OS Image causing error determining license terms for controlPlane",
+			edits:    editFunctions{erroringLicenseTermsOSImageControlPlane, validInstanceTypes},
+			errorMsg: `controlPlane.platform.azure.osImage: Invalid value: .*: could not determine if the license terms for the marketplace image have been accepted: error`,
+		},
+		{
+			name:     "OS Image with unaccepted license terms for controlPlane",
+			edits:    editFunctions{unacceptedLicenseTermsOSImageControlPlane, validInstanceTypes},
+			errorMsg: `controlPlane.platform.azure.osImage: Invalid value: .*: the license terms for the marketplace image have not been accepted`,
+		},
+		{
+			name:     "OS Image with wrong HyperV generation for controlPlane",
+			edits:    editFunctions{erroringGenerationOsImageControlPlane, validInstanceTypes, controlPlaneInstanceTypeHyperVGen1},
+			errorMsg: `controlPlane.platform.azure.osImage: Invalid value: .*: instance type supports HyperVGenerations \[(V[12])\] but the specified image is for HyperVGeneration [^\\1].*`,
+		},
+		{
+			name:     "OS Image with wrong HyperV generation for controlPlane from default MachinePool",
+			edits:    editFunctions{erroringGenerationOsImageControlPlane, defaultMachineInstanceTypeHyperVGen1},
+			errorMsg: `controlPlane.platform.azure.osImage: Invalid value: .*: instance type supports HyperVGenerations \[(V[12])\] but the specified image is for HyperVGeneration [^\\1].*`,
+		},
+		{
+			name:     "OS Image with wrong HyperV generation for inherited instance type for controlPlane",
+			edits:    editFunctions{erroringGenerationOsImageControlPlane, defaultMachineInstanceTypeHyperVGen1},
+			errorMsg: `controlPlane.platform.azure.osImage: Invalid value: .*: instance type supports HyperVGenerations \[(V[12])\] but the specified image is for HyperVGeneration [^\\1].*`,
+		},
+		// Marketplace definition from Default Machine Pool
+		{
+			name:  "Valid OS Image from default MachinePool",
+			edits: editFunctions{validOSImageDefaultMachine, validInstanceTypes},
+		},
+		{
+			name:  "Valid OS Image when default MachinePool not valid",
+			edits: editFunctions{invalidOSImageDefaultMachine, validOSImageControlPlane, validOSImageCompute, validInstanceTypes},
+		},
+		{
+			name:     "Invalid OS Image from default MachinePool",
+			edits:    editFunctions{invalidOSImageDefaultMachine, validInstanceTypes},
+			errorMsg: `^\[controlPlane.platform.azure.osImage: Invalid value: .*: not found, compute\[0\].platform.azure.osImage: Invalid value: .*: not found\]$`,
+		},
+		{
+			name:     "OS Image causing error determining license terms from default MachinePool",
+			edits:    editFunctions{erroringLicenseTermsOSImageDefaultMachine, validInstanceTypes},
+			errorMsg: `^\[controlPlane.platform.azure.osImage: Invalid value: .*: could not determine if the license terms for the marketplace image have been accepted: error, compute\[0\].platform.azure.osImage: Invalid value: .*: could not determine if the license terms for the marketplace image have been accepted: error\]$`,
+		},
+		{
+			name:     "OS Image with unaccepted license terms from default MachinePool",
+			edits:    editFunctions{unacceptedLicenseTermsOSImageDefaultMachine, validInstanceTypes},
+			errorMsg: `^\[controlPlane.platform.azure.osImage: Invalid value: .*: the license terms for the marketplace image have not been accepted, compute\[0\].platform.azure.osImage: Invalid value: .*: the license terms for the marketplace image have not been accepted\]$`,
+		},
+	}
+
+	mockCtrl := gomock.NewController(t)
+	defer mockCtrl.Finish()
+
+	azureClient := mock.NewMockAPI(mockCtrl)
+
+	// Marketplace images
+	azureClient.EXPECT().GetMarketplaceImage(gomock.Any(), validRegion, validOSImagePublisher, validOSImageOffer, validOSImageSKU, validOSImageVersion).Return(marketplaceImageAPIResult, nil).AnyTimes()
+	azureClient.EXPECT().AreMarketplaceImageTermsAccepted(gomock.Any(), validOSImagePublisher, validOSImageOffer, validOSImageSKU).Return(true, nil).AnyTimes()
+	azureClient.EXPECT().GetMarketplaceImage(gomock.Any(), validRegion, validOSImagePublisher, validOSImageOffer, invalidOSImageSKU, validOSImageVersion).Return(marketplaceImageAPIResult, fmt.Errorf("not found")).AnyTimes()
+	azureClient.EXPECT().GetMarketplaceImage(gomock.Any(), validRegion, validOSImagePublisher, validOSImageOffer, erroringLicenseTermsOSImageSKU, validOSImageVersion).Return(marketplaceImageAPIResult, nil).AnyTimes()
+	azureClient.EXPECT().AreMarketplaceImageTermsAccepted(gomock.Any(), validOSImagePublisher, validOSImageOffer, erroringLicenseTermsOSImageSKU).Return(false, fmt.Errorf("error")).AnyTimes()
+	azureClient.EXPECT().GetMarketplaceImage(gomock.Any(), validRegion, validOSImagePublisher, validOSImageOffer, unacceptedLicenseTermsOSImageSKU, validOSImageVersion).Return(marketplaceImageAPIResult, nil).AnyTimes()
+	azureClient.EXPECT().AreMarketplaceImageTermsAccepted(gomock.Any(), validOSImagePublisher, validOSImageOffer, unacceptedLicenseTermsOSImageSKU).Return(false, nil).AnyTimes()
+	azureClient.EXPECT().GetMarketplaceImage(gomock.Any(), validRegion, validOSImagePublisher, validOSImageOffer, erroringOSImageSKU, validOSImageVersion).Return(azenc.VirtualMachineImage{
+		VirtualMachineImageProperties: &azenc.VirtualMachineImageProperties{
+			HyperVGeneration: azenc.HyperVGenerationTypesV2,
+		},
+	}, nil).AnyTimes()
+	azureClient.EXPECT().AreMarketplaceImageTermsAccepted(gomock.Any(), validOSImagePublisher, validOSImageOffer, erroringOSImageSKU).Return(true, nil).AnyTimes()
+
+	// VM Capabilities
+	for key, value := range vmCapabilities {
+		azureClient.EXPECT().GetVMCapabilities(gomock.Any(), key, validRegion).Return(value, nil).AnyTimes()
+	}
+	azureClient.EXPECT().GetVMCapabilities(gomock.Any(), "Dne_D2_v4", validRegion).Return(nil, fmt.Errorf("not found in region centralus")).AnyTimes()
+	azureClient.EXPECT().GetVMCapabilities(gomock.Any(), gomock.Any(), gomock.Any()).Return(vmCapabilities["Standard_D8s_v3"], nil).AnyTimes()
+
+	// HyperVGenerations
+	azureClient.EXPECT().GetHyperVGenerationVersion(gomock.Any(), gomock.Any(), gomock.Any(), "V1").Return("", fmt.Errorf("instance type Standard_D8s_v3 supports HyperVGenerations [V2] but the specified image is for HyperVGeneration V1; to correct this issue either specify a compatible instance type or change the HyperVGeneration for the image by using a different SKU")).AnyTimes()
+	azureClient.EXPECT().GetHyperVGenerationVersion(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return("V2", nil).AnyTimes()
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			editedInstallConfig := validInstallConfig()
+			for _, edit := range tc.edits {
+				edit(editedInstallConfig)
+			}
+			aggregatedErrors := validateMarketplaceImages(azureClient, editedInstallConfig)
+			err := aggregatedErrors.ToAggregate()
+			if tc.errorMsg != "" {
+				assert.Regexp(t, tc.errorMsg, err)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestAzureStackDiskType(t *testing.T) {
+	const unsupportedDiskType = "StandardSSD_LRS"
+
+	validDefaultDiskType := func(ic *types.InstallConfig) {
+		ic.Azure.DefaultMachinePlatform.DiskType = "Premium_LRS"
+	}
+	invalidDefaultDiskType := func(ic *types.InstallConfig) {
+		ic.Azure.DefaultMachinePlatform.DiskType = unsupportedDiskType
+	}
+	validControlPlaneDiskType := func(ic *types.InstallConfig) {
+		ic.ControlPlane.Platform.Azure.DiskType = "Standard_LRS"
+	}
+	invalidControlPlaneDiskType := func(ic *types.InstallConfig) {
+		ic.ControlPlane.Platform.Azure.DiskType = unsupportedDiskType
+	}
+	validComputeDiskType := func(ic *types.InstallConfig) {
+		ic.Compute[0].Platform.Azure.DiskType = "Standard_LRS"
+	}
+	invalidComputeDiskType := func(ic *types.InstallConfig) {
+		ic.Compute[0].Platform.Azure.DiskType = unsupportedDiskType
+	}
+
+	cases := []struct {
+		name     string
+		edits    editFunctions
+		errorMsg string
+	}{
+		{
+			name:     "Valid defaultMachinePlatform DiskType",
+			edits:    editFunctions{validDefaultDiskType},
+			errorMsg: "",
+		},
+		{
+			name:     "Invalid defaultMachinePlatform DiskType",
+			edits:    editFunctions{invalidDefaultDiskType},
+			errorMsg: `\[controlPlane.platform.azure.OSDisk.diskType: Invalid value: "StandardSSD_LRS": disk format not supported. Must be one of \[Premium_LRS Standard_LRS\] compute\[0\].platform.azure.OSDisk.diskType: Invalid value: "StandardSSD_LRS": disk format not supported. Must be one of \[Premium_LRS Standard_LRS\]\]`,
+		},
+		{
+			name:     "Valid controlPlane DiskType",
+			edits:    editFunctions{validControlPlaneDiskType},
+			errorMsg: "",
+		},
+		{
+			name:     "Invalid controlPlane DiskType",
+			edits:    editFunctions{invalidControlPlaneDiskType},
+			errorMsg: `\[controlPlane.platform.azure.OSDisk.diskType: Invalid value: "StandardSSD_LRS": disk format not supported. Must be one of \[Premium_LRS Standard_LRS\]\]`,
+		},
+		{
+			name:     "Valid compute DiskType",
+			edits:    editFunctions{validComputeDiskType},
+			errorMsg: "",
+		},
+		{
+			name:     "Invalid compute DiskType",
+			edits:    editFunctions{invalidComputeDiskType},
+			errorMsg: `\[compute\[0\].platform.azure.OSDisk.diskType: Invalid value: "StandardSSD_LRS": disk format not supported. Must be one of \[Premium_LRS Standard_LRS\]\]`,
+		},
+	}
+
+	mockCtrl := gomock.NewController(t)
+	defer mockCtrl.Finish()
+
+	azureClient := mock.NewMockAPI(mockCtrl)
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			editedInstallConfig := validInstallConfig()
+			for _, edit := range tc.edits {
+				edit(editedInstallConfig)
+			}
+
+			aggregatedErrors := validateAzureStackDiskType(azureClient, editedInstallConfig)
+			if tc.errorMsg != "" {
+				assert.Regexp(t, tc.errorMsg, aggregatedErrors)
+			} else {
+				assert.NoError(t, aggregatedErrors.ToAggregate())
 			}
 		})
 	}

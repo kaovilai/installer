@@ -2,31 +2,14 @@
 
 set -ex
 
+# Source the Cluster API build script.
+# shellcheck source=hack/build-cluster-api.sh
+. "$(dirname "$0")/build-cluster-api.sh"
+
 # shellcheck disable=SC2068
 version() { IFS="."; printf "%03d%03d%03d\\n" $@; unset IFS;}
 
-# Copy the terraform binary and providers to the mirror to be embedded in the installer binary.
-copy_terraform_to_mirror() {
-  TARGET_OS_ARCH=$(go env GOOS)_$(go env GOARCH)
-
-  # Clean the mirror, but preserve the README file.
-  rm -rf "${PWD}"/pkg/terraform/providers/mirror/*/
-
-  # Copy local terraform providers into data
-  find "${PWD}/terraform/bin/${TARGET_OS_ARCH}/" -maxdepth 1 -name "terraform-provider-*.zip" -exec bash -c '
-      providerName="$(basename "$1" | cut -d '-' -f 3 | cut -d '.' -f 1)"
-      targetOSArch="$2"
-      dstDir="${PWD}/pkg/terraform/providers/mirror/openshift/local/$providerName"
-      mkdir -p "$dstDir"
-      echo "Copying $providerName provider to mirror"
-      cp "$1" "$dstDir/terraform-provider-${providerName}_1.0.0_${targetOSArch}.zip"
-    ' shell {} "${TARGET_OS_ARCH}" \;
-
-  mkdir -p "${PWD}/pkg/terraform/providers/mirror/terraform/"
-  cp "${PWD}/terraform/bin/${TARGET_OS_ARCH}/terraform" "${PWD}/pkg/terraform/providers/mirror/terraform/"
-}
-
-minimum_go_version=1.18
+minimum_go_version=1.23
 current_go_version=$(go version | cut -d " " -f 3)
 
 if [ "$(version "${current_go_version#go}")" -lt "$(version "$minimum_go_version")" ]; then
@@ -36,11 +19,10 @@ fi
 
 export CGO_ENABLED=0
 MODE="${MODE:-release}"
-# build terraform binaries before setting environment variables since it messes up make
-make -C terraform all
 
-# Copy terraform parts to embedded mirror.
-copy_terraform_to_mirror
+# build cluster-api binaries
+make -C cluster-api all
+copy_cluster_api_to_mirror
 
 GIT_COMMIT="${SOURCE_GIT_COMMIT:-$(git rev-parse --verify 'HEAD^{commit}')}"
 GIT_TAG="${BUILD_VERSION:-$(git describe --always --abbrev=40 --dirty)}"
@@ -70,10 +52,12 @@ then
 	GOOS='' GOARCH='' go generate ./data
 fi
 
-if (echo "${TAGS}" | grep -q 'libvirt')
+if (echo "${TAGS}" | grep -q '\bfipscapable\b')
 then
 	export CGO_ENABLED=1
 fi
+
+echo "building openshift-install"
 
 # shellcheck disable=SC2086
 go build ${GOFLAGS} -gcflags "${GCFLAGS}" -ldflags "${LDFLAGS}" -tags "${TAGS}" -o "${OUTPUT}" ./cmd/openshift-install

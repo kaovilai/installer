@@ -1,11 +1,13 @@
 package gcp
 
 import (
+	"context"
+	"fmt"
 	"regexp"
+	"strings"
 
 	"github.com/pkg/errors"
-	"google.golang.org/api/googleapi"
-	storage "google.golang.org/api/storage/v1"
+	"google.golang.org/api/iterator"
 )
 
 var (
@@ -13,48 +15,55 @@ var (
 	multiDashes = regexp.MustCompile(`-{2,}`)
 )
 
-func (o *ClusterUninstaller) listBuckets() ([]cloudResource, error) {
-	return o.listBucketsWithFilter("items(name),nextPageToken", o.ClusterID+"-", nil)
+const (
+	bucketResourceName = "bucket"
+)
+
+func (o *ClusterUninstaller) listBuckets(ctx context.Context) ([]cloudResource, error) {
+	return o.listBucketsWithFilter(ctx, "items(name),nextPageToken",
+		func(itemName string) bool {
+			prefix := multiDashes.ReplaceAllString(o.ClusterID+"-", "-")
+			return strings.HasPrefix(itemName, prefix)
+		})
 }
 
 // listBucketsWithFilter lists buckets in the project that satisfy the filter criteria.
 // The fields parameter specifies which fields should be returned in the result, the filter string contains
 // a prefix string passed to the API to filter results. The filterFunc is a client-side filtering function
 // that determines whether a particular result should be returned or not.
-func (o *ClusterUninstaller) listBucketsWithFilter(fields string, prefix string, filterFunc func(*storage.Bucket) bool) ([]cloudResource, error) {
+func (o *ClusterUninstaller) listBucketsWithFilter(ctx context.Context, fields string, filterFunc resourceFilterFunc) ([]cloudResource, error) {
 	o.Logger.Debug("Listing storage buckets")
-	ctx, cancel := o.contextWithTimeout()
+	ctx, cancel := context.WithTimeout(ctx, defaultTimeout)
 	defer cancel()
 	result := []cloudResource{}
-	req := o.storageSvc.Buckets.List(o.ProjectID).Fields(googleapi.Field(fields))
-	if len(prefix) > 0 {
-		prefix = multiDashes.ReplaceAllString(prefix, "-")
-		req = req.Prefix(prefix)
-	}
-	err := req.Pages(ctx, func(list *storage.Buckets) error {
-		for _, item := range list.Items {
-			if filterFunc == nil || filterFunc != nil && filterFunc(item) {
-				o.Logger.Debugf("Found bucket: %s", item.Name)
-				result = append(result, cloudResource{
-					key:      item.Name,
-					name:     item.Name,
-					typeName: "bucket",
-				})
-			}
+
+	it := o.storageSvc.Buckets(ctx, o.ProjectID)
+	for {
+		bucketAttrs, err := it.Next()
+		if errors.Is(err, iterator.Done) {
+			break
 		}
-		return nil
-	})
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to fetch object storage buckets")
+
+		if err != nil {
+			return nil, fmt.Errorf("failed to fetch storage bucket: %w", err)
+		}
+		if filterFunc(bucketAttrs.Name) {
+			o.Logger.Debugf("Found bucket: %s", bucketAttrs.Name)
+			result = append(result, cloudResource{
+				key:      bucketAttrs.Name,
+				name:     bucketAttrs.Name,
+				typeName: bucketResourceName,
+			})
+		}
 	}
 	return result, nil
 }
 
-func (o *ClusterUninstaller) deleteBucket(item cloudResource) error {
-	o.Logger.Debugf("Deleting storate bucket %s", item.name)
-	ctx, cancel := o.contextWithTimeout()
+func (o *ClusterUninstaller) deleteBucket(ctx context.Context, item cloudResource) error {
+	o.Logger.Debugf("Deleting storage bucket %s", item.name)
+	ctx, cancel := context.WithTimeout(ctx, defaultTimeout)
 	defer cancel()
-	err := o.storageSvc.Buckets.Delete(item.name).Context(ctx).Do()
+	err := o.storageSvc.Bucket(item.name).Delete(ctx)
 	if err != nil && !isNoOp(err) {
 		return errors.Wrapf(err, "failed to delete bucket %s", item.name)
 	}
@@ -65,30 +74,30 @@ func (o *ClusterUninstaller) deleteBucket(item cloudResource) error {
 
 // destroyBuckets finds all gcs buckets that have a name prefixed
 // with the cluster's infra ID. It then removes all the objects in each bucket and deletes it.
-func (o *ClusterUninstaller) destroyBuckets() error {
-	found, err := o.listBuckets()
+func (o *ClusterUninstaller) destroyBuckets(ctx context.Context) error {
+	found, err := o.listBuckets(ctx)
 	if err != nil {
 		return err
 	}
-	items := o.insertPendingItems("bucket", found)
+	items := o.insertPendingItems(bucketResourceName, found)
 	for _, item := range items {
-		foundObjects, err := o.listBucketObjects(item)
+		foundObjects, err := o.listBucketObjects(ctx, item)
 		if err != nil {
 			return err
 		}
-		objects := o.insertPendingItems("bucketobject", foundObjects)
+		objects := o.insertPendingItems(bucketObjectResourceName, foundObjects)
 		for _, object := range objects {
-			err = o.deleteBucketObject(item, object)
+			err = o.deleteBucketObject(ctx, item, object)
 			if err != nil {
 				o.errorTracker.suppressWarning(object.key, err, o.Logger)
 			}
 		}
-		err = o.deleteBucket(item)
+		err = o.deleteBucket(ctx, item)
 		if err != nil {
 			o.errorTracker.suppressWarning(item.key, err, o.Logger)
 		}
 	}
-	if items = o.getPendingItems("bucket"); len(items) > 0 {
+	if items = o.getPendingItems(bucketResourceName); len(items) > 0 {
 		return errors.Errorf("%d items pending", len(items))
 	}
 	return nil

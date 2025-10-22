@@ -2,6 +2,8 @@ package azure
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -16,7 +18,6 @@ import (
 	azureenv "github.com/Azure/go-autorest/autorest/azure"
 	"github.com/jongio/azidext/go/azidext"
 	azurekiota "github.com/microsoft/kiota-authentication-azure-go"
-	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 
 	"github.com/openshift/installer/pkg/types/azure"
@@ -29,12 +30,25 @@ var (
 	onceLoggers         = map[string]*sync.Once{}
 )
 
+// AuthenticationType identifies the authentication method used.
+type AuthenticationType int
+
+// The authentication types supported by the installer.
+const (
+	ClientSecretAuth AuthenticationType = iota
+	ClientCertificateAuth
+	ManagedIdentityAuth
+)
+
 // Session is an object representing session for subscription
 type Session struct {
 	Authorizer   autorest.Authorizer
 	Credentials  Credentials
 	Environment  azureenv.Environment
 	AuthProvider *azurekiota.AzureIdentityAuthenticationProvider
+	TokenCreds   azcore.TokenCredential
+	CloudConfig  cloud.Configuration
+	AuthType     AuthenticationType
 }
 
 // Credentials is the data type for credentials as understood by the azure sdk
@@ -66,7 +80,58 @@ func GetSessionWithCredentials(cloudName azure.CloudEnvironment, armEndpoint str
 		cloudEnv, err = azureenv.EnvironmentFromName(string(cloudName))
 	}
 	if err != nil {
-		return nil, errors.Wrapf(err, "failed to get Azure environment for the %q cloud", cloudName)
+		return nil, fmt.Errorf("failed to get Azure environment for the %q cloud: %w", cloudName, err)
+	}
+
+	cloudConfig, err := GetCloudConfiguration(cloudName, armEndpoint)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get cloud configuration for the %q cloud: %w", cloudName, err)
+	}
+
+	if credentials == nil {
+		credentials, err = credentialsFromFileOrUser()
+		if err != nil {
+			return nil, err
+		}
+	}
+	var cred azcore.TokenCredential
+	var authType AuthenticationType
+	switch {
+	case credentials.ClientCertificatePath != "":
+		logrus.Warnf("Using client certs to authenticate. Please be warned cluster does not support certs and only the installer does.")
+		cred, err = newTokenCredentialFromCertificates(credentials, *cloudConfig)
+		authType = ClientCertificateAuth
+	case credentials.ClientSecret != "":
+		cred, err = newTokenCredentialFromCredentials(credentials, *cloudConfig)
+		authType = ClientSecretAuth
+	default:
+		cred, err = newTokenCredentialFromMSI(credentials, *cloudConfig)
+		authType = ManagedIdentityAuth
+	}
+	if err != nil {
+		return nil, err
+	}
+	session, err := newSessionFromCredentials(cloudEnv, credentials, cred)
+	if err != nil {
+		return nil, err
+	}
+	session.CloudConfig = *cloudConfig
+	session.AuthType = authType
+	return session, nil
+}
+
+// GetCloudConfiguration gets a cloud configuration from the cloud name and endpoint.
+func GetCloudConfiguration(cloudName azure.CloudEnvironment, armEndpoint string) (*cloud.Configuration, error) {
+	var cloudEnv azureenv.Environment
+	var err error
+	switch cloudName {
+	case azure.StackCloud:
+		cloudEnv, err = azureenv.EnvironmentFromURL(armEndpoint)
+	default:
+		cloudEnv, err = azureenv.EnvironmentFromName(string(cloudName))
+	}
+	if err != nil {
+		return nil, err
 	}
 
 	var cloudConfig cloud.Configuration
@@ -89,23 +154,7 @@ func GetSessionWithCredentials(cloudName azure.CloudEnvironment, armEndpoint str
 		cloudConfig = cloud.AzurePublic
 	}
 
-	if credentials == nil {
-		credentials, err = credentialsFromFileOrUser()
-		if err != nil {
-			return nil, err
-		}
-	}
-	var cred azcore.TokenCredential
-	if credentials.ClientCertificatePath != "" {
-		logrus.Warnf("Using client certs to authenticate. Please be warned cluster does not support certs and only the installer does.")
-		cred, err = newTokenCredentialFromCertificates(credentials, cloudConfig)
-	} else {
-		cred, err = newTokenCredentialFromCredentials(credentials, cloudConfig)
-	}
-	if err != nil {
-		return nil, err
-	}
-	return newSessionFromCredentials(cloudEnv, credentials, cred)
+	return &cloudConfig, nil
 }
 
 // credentialsFromFileOrUser returns credentials found
@@ -126,11 +175,11 @@ func credentialsFromFileOrUser() (*Credentials, error) {
 			logrus.Infof("Asking user to provide authentication info")
 			credentials, cerr := askForCredentials()
 			if cerr != nil {
-				return nil, errors.Wrap(cerr, "failed to retrieve credentials from user")
+				return nil, fmt.Errorf("failed to retrieve credentials from user: %w", cerr)
 			}
 			logrus.Infof("Saving user credentials to %q", authFilePath)
 			if cerr = saveCredentials(*credentials, authFilePath); cerr != nil {
-				return nil, errors.Wrap(cerr, "failed to save credentials")
+				return nil, fmt.Errorf("failed to save credentials: %w", cerr)
 			}
 			authFile = *credentials
 		} else {
@@ -162,15 +211,13 @@ func checkCredentials(creds Credentials) error {
 	if creds.SubscriptionID == "" {
 		return errors.New("could not retrieve subscriptionId from auth file")
 	}
-	if creds.ClientID == "" {
-		return errors.New("could not retrieve clientId from auth file")
-	}
 	if creds.TenantID == "" {
 		return errors.New("could not retrieve tenantId from auth file")
 	}
-	if creds.ClientSecret == "" && creds.ClientCertificatePath == "" {
-		return errors.New("could not retrieve either client secret or client certs from auth file")
+	if (creds.ClientSecret != "" || creds.ClientCertificatePath != "") && creds.ClientID == "" {
+		return errors.New("could not retrieve clientId from auth file")
 	}
+	// If neither client secret nor client certificate are present, we default to Managed Identity
 	return nil
 }
 
@@ -256,7 +303,7 @@ func newTokenCredentialFromCredentials(credentials *Credentials, cloudConfig clo
 
 	cred, err := azidentity.NewClientSecretCredential(credentials.TenantID, credentials.ClientID, credentials.ClientSecret, &options)
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to get client credentials from secret")
+		return nil, fmt.Errorf("failed to get client credentials from secret: %w", err)
 	}
 	return cred, nil
 }
@@ -266,11 +313,12 @@ func newTokenCredentialFromCertificates(credentials *Credentials, cloudConfig cl
 		ClientOptions: azcore.ClientOptions{
 			Cloud: cloudConfig,
 		},
+		SendCertificateChain: true,
 	}
 
 	data, err := os.ReadFile(credentials.ClientCertificatePath)
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to read client certificate file")
+		return nil, fmt.Errorf("failed to read client certificate file: %w", err)
 	}
 
 	// NewClientCertificateCredential requires at least one *x509.Certificate,
@@ -280,12 +328,30 @@ func newTokenCredentialFromCertificates(credentials *Credentials, cloudConfig cl
 	// keys.
 	certs, key, err := azidentity.ParseCertificates(data, []byte(credentials.ClientCertificatePassword))
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to parse client certificate")
+		return nil, fmt.Errorf("failed to parse client certificate: %w", err)
 	}
 
 	cred, err := azidentity.NewClientCertificateCredential(credentials.TenantID, credentials.ClientID, certs, key, &options)
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to get client credentials from certificate")
+		return nil, fmt.Errorf("failed to get client credentials from certificate: %w", err)
+	}
+	return cred, nil
+}
+
+func newTokenCredentialFromMSI(credentials *Credentials, cloudConfig cloud.Configuration) (azcore.TokenCredential, error) {
+	options := azidentity.ManagedIdentityCredentialOptions{
+		ClientOptions: azcore.ClientOptions{
+			Cloud: cloudConfig,
+		},
+	}
+	// User-assigned identity
+	if credentials.ClientID != "" {
+		options.ID = azidentity.ClientID(credentials.ClientID)
+	}
+
+	cred, err := azidentity.NewManagedIdentityCredential(&options)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get client credentials from MSI: %w", err)
 	}
 	return cred, nil
 }
@@ -301,7 +367,7 @@ func newSessionFromCredentials(cloudEnv azureenv.Environment, credentials *Crede
 	}
 	authProvider, err := azurekiota.NewAzureIdentityAuthenticationProviderWithScopes(cred, scope)
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to get Azidentity authentication provider")
+		return nil, fmt.Errorf("failed to get Azidentity authentication provider: %w", err)
 	}
 
 	// Use an adapter so azidentity in the Azure SDK can be used as
@@ -317,6 +383,7 @@ func newSessionFromCredentials(cloudEnv azureenv.Environment, credentials *Crede
 		Credentials:  *credentials,
 		Environment:  cloudEnv,
 		AuthProvider: authProvider,
+		TokenCreds:   cred,
 	}, nil
 }
 

@@ -1,20 +1,26 @@
 package manifests
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"testing"
 
-	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
+	"go.uber.org/mock/gomock"
+	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	aiv1beta1 "github.com/openshift/assisted-service/api/v1beta1"
 	"github.com/openshift/assisted-service/models"
 	"github.com/openshift/installer/pkg/asset"
+	agentconfig "github.com/openshift/installer/pkg/asset/agent"
+	"github.com/openshift/installer/pkg/asset/agent/joiner"
+	"github.com/openshift/installer/pkg/asset/agent/workflow"
 	"github.com/openshift/installer/pkg/asset/mock"
+	"github.com/openshift/installer/pkg/types/agent"
 )
 
 func TestNMStateConfig_Generate(t *testing.T) {
@@ -26,9 +32,122 @@ func TestNMStateConfig_Generate(t *testing.T) {
 		expectedError      string
 	}{
 		{
-			name: "agent-config does not contain networkConfig",
+			name: "add-nodes workflow",
 			dependencies: []asset.Asset{
-				getValidDHCPAgentConfigNoHosts(),
+				&workflow.AgentWorkflow{Workflow: workflow.AgentWorkflowTypeAddNodes},
+				&joiner.ClusterInfo{},
+				getAgentHostsNoHosts(),
+				&agentconfig.OptionalInstallConfig{},
+			},
+			requiresNmstatectl: false,
+			expectedConfig:     nil,
+			expectedError:      "",
+		},
+		{
+			name: "add-nodes workflow - agentHosts with some hosts without networkconfig",
+			dependencies: []asset.Asset{
+				&workflow.AgentWorkflow{Workflow: workflow.AgentWorkflowTypeAddNodes},
+				&joiner.ClusterInfo{
+					Namespace:   "cluster0",
+					ClusterName: "ostest",
+					Nodes:       &v1.NodeList{},
+				},
+				getAgentHostsWithSomeHostsWithoutNetworkConfig(),
+				&agentconfig.OptionalInstallConfig{},
+			},
+			requiresNmstatectl: true,
+			expectedConfig: []*aiv1beta1.NMStateConfig{
+				{
+					TypeMeta: metav1.TypeMeta{
+						Kind:       "NMStateConfig",
+						APIVersion: "agent-install.openshift.io/v1beta1",
+					},
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "ostest-0",
+						Namespace: "cluster0",
+						Labels:    getNMStateConfigLabels("ostest"),
+					},
+					Spec: aiv1beta1.NMStateConfigSpec{
+						Interfaces: []*aiv1beta1.Interface{
+							{
+								Name:       "enp2t0",
+								MacAddress: "98:af:65:a5:8d:02",
+							},
+						},
+						NetConfig: aiv1beta1.NetConfig{
+							Raw: unmarshalJSON([]byte(rawNMStateConfigNoIP)),
+						},
+					},
+				},
+			},
+			expectedError: "",
+		},
+		{
+			name: "add-nodes workflow - invalid ip",
+			dependencies: []asset.Asset{
+				&workflow.AgentWorkflow{Workflow: workflow.AgentWorkflowTypeAddNodes},
+				&joiner.ClusterInfo{
+					Namespace:   "cluster0",
+					ClusterName: "ostest",
+					Nodes: &v1.NodeList{
+						Items: []v1.Node{
+							{
+								ObjectMeta: metav1.ObjectMeta{
+									Name: "master-0",
+								},
+								Status: v1.NodeStatus{
+									Addresses: []v1.NodeAddress{
+										{
+											Address: "192.168.122.21", // configured by getValidAgentHostsConfig()
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+				getValidAgentHostsConfig(),
+				&agentconfig.OptionalInstallConfig{},
+			},
+			requiresNmstatectl: false,
+			expectedError:      "address conflict found. The configured address 192.168.122.21 is already used by the cluster node master-0",
+		},
+		{
+			name: "add-nodes workflow - invalid hostname",
+			dependencies: []asset.Asset{
+				&workflow.AgentWorkflow{Workflow: workflow.AgentWorkflowTypeAddNodes},
+				&joiner.ClusterInfo{
+					Namespace:   "cluster0",
+					ClusterName: "ostest",
+					Nodes: &v1.NodeList{
+						Items: []v1.Node{
+							{
+								ObjectMeta: metav1.ObjectMeta{
+									Name: "control-0.example.org",
+								},
+								Status: v1.NodeStatus{
+									Addresses: []v1.NodeAddress{
+										{
+											Address: "control-0.example.org", // configured by getValidAgentHostsConfig()
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+				getValidAgentHostsConfig(),
+				&agentconfig.OptionalInstallConfig{},
+			},
+			requiresNmstatectl: false,
+			expectedError:      "hostname conflict found. The configured hostname control-0.example.org is already used in the cluster",
+		},
+		{
+			name: "agentHosts does not contain networkConfig",
+			dependencies: []asset.Asset{
+				&workflow.AgentWorkflow{Workflow: workflow.AgentWorkflowTypeInstall},
+				&joiner.ClusterInfo{},
+				getAgentHostsNoHosts(),
 				getValidOptionalInstallConfig(),
 			},
 			requiresNmstatectl: false,
@@ -36,9 +155,11 @@ func TestNMStateConfig_Generate(t *testing.T) {
 			expectedError:      "",
 		},
 		{
-			name: "valid dhcp agent config with some hosts without networkconfig",
+			name: "agentHosts with some hosts without networkconfig",
 			dependencies: []asset.Asset{
-				getValidDHCPAgentConfigWithSomeHostsWithoutNetworkConfig(),
+				&workflow.AgentWorkflow{Workflow: workflow.AgentWorkflowTypeInstall},
+				&joiner.ClusterInfo{},
+				getAgentHostsWithSomeHostsWithoutNetworkConfig(),
 				getValidOptionalInstallConfig(),
 			},
 			requiresNmstatectl: true,
@@ -49,9 +170,9 @@ func TestNMStateConfig_Generate(t *testing.T) {
 						APIVersion: "agent-install.openshift.io/v1beta1",
 					},
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      fmt.Sprint(getNMStateConfigName(getValidOptionalInstallConfig()), "-0"),
-						Namespace: getObjectMetaNamespace(getValidOptionalInstallConfig()),
-						Labels:    getNMStateConfigLabels(getValidOptionalInstallConfig()),
+						Name:      fmt.Sprint(getValidOptionalInstallConfig().ClusterName(), "-0"),
+						Namespace: getValidOptionalInstallConfig().ClusterNamespace(),
+						Labels:    getNMStateConfigLabels(getValidOptionalInstallConfig().ClusterName()),
 					},
 					Spec: aiv1beta1.NMStateConfigSpec{
 						Interfaces: []*aiv1beta1.Interface{
@@ -71,7 +192,9 @@ func TestNMStateConfig_Generate(t *testing.T) {
 		{
 			name: "valid config",
 			dependencies: []asset.Asset{
-				getValidAgentConfig(),
+				&workflow.AgentWorkflow{Workflow: workflow.AgentWorkflowTypeInstall},
+				&joiner.ClusterInfo{},
+				getValidAgentHostsConfig(),
 				getValidOptionalInstallConfig(),
 			},
 			requiresNmstatectl: true,
@@ -82,9 +205,9 @@ func TestNMStateConfig_Generate(t *testing.T) {
 						APIVersion: "agent-install.openshift.io/v1beta1",
 					},
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      fmt.Sprint(getNMStateConfigName(getValidOptionalInstallConfig()), "-0"),
-						Namespace: getObjectMetaNamespace(getValidOptionalInstallConfig()),
-						Labels:    getNMStateConfigLabels(getValidOptionalInstallConfig()),
+						Name:      fmt.Sprint(getValidOptionalInstallConfig().ClusterName(), "-0"),
+						Namespace: getValidOptionalInstallConfig().ClusterNamespace(),
+						Labels:    getNMStateConfigLabels(getValidOptionalInstallConfig().ClusterName()),
 					},
 					Spec: aiv1beta1.NMStateConfigSpec{
 						Interfaces: []*aiv1beta1.Interface{
@@ -108,9 +231,9 @@ func TestNMStateConfig_Generate(t *testing.T) {
 						APIVersion: "agent-install.openshift.io/v1beta1",
 					},
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      fmt.Sprint(getNMStateConfigName(getValidOptionalInstallConfig()), "-1"),
-						Namespace: getObjectMetaNamespace(getValidOptionalInstallConfig()),
-						Labels:    getNMStateConfigLabels(getValidOptionalInstallConfig()),
+						Name:      fmt.Sprint(getValidOptionalInstallConfig().ClusterName(), "-1"),
+						Namespace: getValidOptionalInstallConfig().ClusterNamespace(),
+						Labels:    getNMStateConfigLabels(getValidOptionalInstallConfig().ClusterName()),
 					},
 					Spec: aiv1beta1.NMStateConfigSpec{
 						Interfaces: []*aiv1beta1.Interface{
@@ -130,9 +253,9 @@ func TestNMStateConfig_Generate(t *testing.T) {
 						APIVersion: "agent-install.openshift.io/v1beta1",
 					},
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      fmt.Sprint(getNMStateConfigName(getValidOptionalInstallConfig()), "-2"),
-						Namespace: getObjectMetaNamespace(getValidOptionalInstallConfig()),
-						Labels:    getNMStateConfigLabels(getValidOptionalInstallConfig()),
+						Name:      fmt.Sprint(getValidOptionalInstallConfig().ClusterName(), "-2"),
+						Namespace: getValidOptionalInstallConfig().ClusterNamespace(),
+						Labels:    getNMStateConfigLabels(getValidOptionalInstallConfig().ClusterName()),
 					},
 					Spec: aiv1beta1.NMStateConfigSpec{
 						Interfaces: []*aiv1beta1.Interface{
@@ -152,12 +275,38 @@ func TestNMStateConfig_Generate(t *testing.T) {
 		{
 			name: "invalid networkConfig",
 			dependencies: []asset.Asset{
-				getInValidAgentConfig(),
+				&workflow.AgentWorkflow{Workflow: workflow.AgentWorkflowTypeInstall},
+				&joiner.ClusterInfo{},
+				getInValidAgentHostsConfig(),
 				getValidOptionalInstallConfig(),
 			},
 			requiresNmstatectl: true,
 			expectedConfig:     nil,
 			expectedError:      "failed to validate network yaml",
+		},
+		{
+			name: "invalid networkConfig, no interfaces in interface table",
+			dependencies: []asset.Asset{
+				&workflow.AgentWorkflow{Workflow: workflow.AgentWorkflowTypeInstall},
+				&joiner.ClusterInfo{},
+				getAgentHostsConfigNoInterfaces(),
+				getValidOptionalInstallConfig(),
+			},
+			requiresNmstatectl: true,
+			expectedConfig:     nil,
+			expectedError:      "at least one interface for host 0 must be provided",
+		},
+		{
+			name: "invalid networkConfig, invalid mac in interface table",
+			dependencies: []asset.Asset{
+				&workflow.AgentWorkflow{Workflow: workflow.AgentWorkflowTypeInstall},
+				&joiner.ClusterInfo{},
+				getAgentHostsConfigInvalidMac(),
+				getValidOptionalInstallConfig(),
+			},
+			requiresNmstatectl: true,
+			expectedConfig:     nil,
+			expectedError:      "MAC address 98-af-65-a5-8d-02 for host 0 is incorrectly formatted, use XX:XX:XX:XX:XX:XX format",
 		},
 	}
 	for _, tc := range cases {
@@ -166,7 +315,7 @@ func TestNMStateConfig_Generate(t *testing.T) {
 			parents.Add(tc.dependencies...)
 
 			asset := &NMStateConfig{}
-			err := asset.Generate(parents)
+			err := asset.Generate(context.Background(), parents)
 
 			// Check if the test failed because nmstatectl is not available in CI
 			if tc.requiresNmstatectl {
@@ -345,32 +494,34 @@ spec:
 			expectedError:      "staticNetwork configuration is not valid",
 		},
 
-		{
-			name: "invalid-address-for-type",
-			data: `
-metadata:
-  name: mynmstateconfig
-  namespace: spoke-cluster
-  labels:
-    cluster0-nmstate-label-name: cluster0-nmstate-label-value
-spec:
-  config:
-    interfaces:
-      - name: eth0
-        type: ethernet
-        state: up
-        mac-address: 52:54:01:aa:aa:a1
-        ipv6:
-          enabled: true
-          address:
-            - ip: 192.168.122.21
-              prefix-length: 24
-  interfaces:
-    - name: "eth0"
-      macAddress: "52:54:01:aa:aa:a1"`,
-			requiresNmstatectl: true,
-			expectedError:      "staticNetwork configuration is not valid",
-		},
+		// This test case currently does not work for libnmstate 2.2.9,
+		// due a regression that will be fixed in https://github.com/nmstate/nmstate/issues/2311
+		// 		{
+		// 			name: "invalid-address-for-type",
+		// 			data: `
+		// metadata:
+		//   name: mynmstateconfig
+		//   namespace: spoke-cluster
+		//   labels:
+		//     cluster0-nmstate-label-name: cluster0-nmstate-label-value
+		// spec:
+		//   config:
+		//     interfaces:
+		//       - name: eth0
+		//         type: ethernet
+		//         state: up
+		//         mac-address: 52:54:01:aa:aa:a1
+		//         ipv6:
+		//           enabled: true
+		//           address:
+		//             - ip: 192.168.122.21
+		//               prefix-length: 24
+		//   interfaces:
+		//     - name: "eth0"
+		//       macAddress: "52:54:01:aa:aa:a1"`,
+		// 			requiresNmstatectl: true,
+		// 			expectedError:      "staticNetwork configuration is not valid",
+		// 		},
 
 		{
 			name: "missing-label",
@@ -394,7 +545,7 @@ spec:
     - name: "eth0"
       macAddress: "52:54:01:aa:aa:a1"`,
 			requiresNmstatectl: true,
-			expectedError:      "invalid NMStateConfig configuration: ObjectMeta.Labels: Required value: mynmstateconfig does not have any label set",
+			expectedError:      "invalid NMStateConfig configuration: labels: Required value: mynmstateconfig does not have any label set",
 		},
 
 		{
@@ -471,6 +622,7 @@ func TestGetNodeZeroIP(t *testing.T) {
 		expectedIP    string
 		expectedError string
 		configs       []string
+		hosts         []agent.Host
 	}{
 		{
 			name:          "no interfaces",
@@ -606,6 +758,110 @@ interfaces:
 `,
 			},
 		},
+		{
+			name:       "skip workers/nodes without role",
+			expectedIP: "192.168.122.22",
+			hosts: []agent.Host{
+				{
+					Role: "worker",
+					NetworkConfig: aiv1beta1.NetConfig{Raw: []byte(`
+interfaces:
+- name: eth0
+  type: ethernet
+  ipv4:
+    address:
+      - ip: 192.168.122.31`)},
+				},
+				{
+					Role: "",
+					NetworkConfig: aiv1beta1.NetConfig{Raw: []byte(`
+interfaces:
+- name: eth0
+  type: ethernet
+  ipv4:
+    address:
+      - ip: 192.168.122.32`)},
+				},
+				{
+					Role: "master",
+					NetworkConfig: aiv1beta1.NetConfig{Raw: []byte(`
+interfaces:
+- name: eth0
+  type: ethernet
+  ipv4:
+    address:
+      - ip: 192.168.122.22`)},
+				},
+			},
+		},
+		{
+			name:          "fail if only workers",
+			expectedError: "invalid NMState configurations provided, no interface IPs set",
+			hosts: []agent.Host{
+				{
+					Role: "worker",
+					NetworkConfig: aiv1beta1.NetConfig{Raw: []byte(`
+interfaces:
+- name: eth0
+  type: ethernet
+  ipv4:
+    address:
+      - ip: 192.168.122.31`)},
+				},
+			},
+		},
+		{
+			name:          "fail if only master without static configuration",
+			expectedError: "invalid NMState configurations provided, no interface IPs set",
+			hosts: []agent.Host{
+				{
+					Role: "master",
+				},
+			},
+		},
+		{
+			name:       "fallback on configs if missing host definition",
+			expectedIP: "192.168.122.22",
+			hosts: []agent.Host{
+				{
+					Role: "master",
+				},
+			},
+			configs: []string{`
+interfaces:
+  - name: eth0
+    type: ethernet
+    ipv4:
+      address:
+        - ip: 192.168.122.22`,
+			},
+		},
+		{
+			name:       "implicit masters",
+			expectedIP: "192.168.122.32",
+			hosts: []agent.Host{
+				{
+					Role: "worker",
+					NetworkConfig: aiv1beta1.NetConfig{Raw: []byte(`
+interfaces:
+- name: eth0
+  type: ethernet
+  ipv4:
+    address:
+      - ip: 192.168.122.31`)},
+				},
+				{
+					Role: "",
+					NetworkConfig: aiv1beta1.NetConfig{Raw: []byte(`
+interfaces:
+- name: eth0
+  type: ethernet
+  ipv4:
+    address:
+      - ip: 192.168.122.32`)},
+				},
+			},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -620,7 +876,7 @@ interfaces:
 				})
 			}
 
-			ip, err := GetNodeZeroIP(configs)
+			ip, err := GetNodeZeroIP(tc.hosts, configs)
 			if tc.expectedError == "" {
 				assert.NoError(t, err)
 				assert.Equal(t, tc.expectedIP, ip)

@@ -2,13 +2,21 @@
 
 aliases:
   installer-team:
-    - AnnaZivkovic
+    - andfasano
     - barbacbd
+    - bfournie
     - jhixson74
     - patrickdillon
-    - r4f4
+    - pawanpinjarkar
     - rna-afk
+    - rwsu
     - sadasu
+    - tthvo
+  splat-team:
+    - jcpowermac
+    - mtulio
+    - rvanderp3
+    - vr4manta
   libvirt-approvers:
     - praveenkumar
     - cfergeau
@@ -16,21 +24,13 @@ aliases:
     - praveenkumar
     - cfergeau
   openstack-approvers:
-    - EmilienM
-    - MaysaMacedo
-    - dulek
     - gryf
     - mandre
-    - mdbooth
     - pierreprinetti
     - stephenfin
   openstack-reviewers:
-    - EmilienM
-    - MaysaMacedo
-    - dulek
     - gryf
     - mandre
-    - mdbooth
     - pierreprinetti
     - stephenfin
   powervs-approvers:
@@ -47,9 +47,12 @@ aliases:
     - jcpowermac
     - patrickdillon
     - rvanderp3
+    - vr4manta
   vsphere-reviewers:
     - jcpowermac
     - patrickdillon
+    - rvanderp3
+    - vr4manta
   baremetal-approvers:
     - dtantsur
     - elfosardo
@@ -63,19 +66,23 @@ aliases:
   aws-approvers:
     - mtulio
     - patrickdillon
+    - tthvo
   aws-reviewers:
     - mtulio
     - patrickdillon
+    - tthvo
   gcp-approvers:
     - patrickdillon
   gcp-reviewers:
     - patrickdillon
   azure-approvers:
     - jhixson74
-    - mtulio
+    - rna-afk
+    - sadasu
   azure-reviewers:
     - jhixson74
-    - mtulio
+    - rna-afk
+    - sadasu
   ovirt-approvers:
     - janosdebugs
     - eslutsky
@@ -97,23 +104,22 @@ aliases:
   nutanix-approvers:
     - adiantum
     - rvanderp3
+    - jcpowermac
     - thunderboltsid
     - yanhua121
   nutanix-reviewers:
     - adiantum
     - rvanderp3
+    - jcpowermac
     - thunderboltsid
     - yanhua121
   # Keep in sync with the `coreos-approvers` and `coreos-reviewers` lists in https://github.com/openshift/release/blob/master/OWNERS_ALIASES
   coreos-approvers:
     - c4rt0
     - cgwalters
-    - bgilbert
     - dustymabe
     - mike-nguyen
     - jlebon
-    - ashcrow
-    - sohankunkerkar
     - travier
     - HuijingHei
     - jmarrero
@@ -124,15 +130,21 @@ aliases:
     - marmijo
     - RishabhSaini
     - Adam0Brien
+    - lukewarmtemp
+    - yasminvalim
+    - jbtrystram
+    - madhu-pillai
+    - Johan-Liebert1
+    - tlbueno
+    - joelcapitao
+    - Roshan-R
+    - PeaceRebel
   coreos-reviewers:
     - c4rt0
     - cgwalters
-    - bgilbert
     - dustymabe
     - mike-nguyen
     - jlebon
-    - ashcrow
-    - sohankunkerkar
     - travier
     - HuijingHei
     - jmarrero
@@ -143,21 +155,35 @@ aliases:
     - marmijo
     - RishabhSaini
     - Adam0Brien
+    - lukewarmtemp
+    - yasminvalim
+    - jbtrystram
+    - madhu-pillai
+    - Johan-Liebert1
+    - tlbueno
+    - joelcapitao
+    - Roshan-R
+    - PeaceRebel
   agent-reviewers:
     - andfasano
     - bfournie
-    - celebdor
-    - dhellmann
-    - lranjbar
     - pawanpinjarkar
     - rwsu
     - zaneb
   agent-approvers:
     - andfasano
     - bfournie
-    - celebdor
-    - dhellmann
-    - lranjbar
     - pawanpinjarkar
     - rwsu
     - zaneb
+  imagebased-reviewers:
+    - eranco74
+    - javipolo
+    - mresvanis
+    - tsorya
+  imagebased-approvers:
+    - eranco74
+    - patrickdillon
+    - tsorya
+    - zaneb
+    - mresvanis

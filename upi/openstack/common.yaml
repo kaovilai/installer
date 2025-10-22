@@ -1,21 +1,27 @@
 - hosts: localhost
   gather_facts: no
 
-  vars_files:
-  - metadata.json
+  vars:
+    var_files:
+    - metadata.json
+    - netid.json
 
   tasks:
+  - name: "Include external vars"
+    include_vars: "{{ item }}"
+    when: item is exists
+    loop: "{{ var_files|flatten(levels=1) }}"
+
+  - name: "Check if metadata.json exists"
+    ansible.builtin.stat:
+      path: metadata.json
+    register: sym
+
   - name: 'Compute resource names'
     set_fact:
       cluster_id_tag: "openshiftClusterID={{ infraID }}"
       primary_cluster_network_tag: "{{ infraID }}-primaryClusterNetwork"
       os_infra_id: "{{ infraID }}"
-      os_network: "{{ infraID }}-network"
-      os_subnet: "{{ infraID }}-nodes"
-      os_router: "{{ infraID }}-external-router"
-      # Port names
-      os_port_api: "{{ infraID }}-api-port"
-      os_port_ingress: "{{ infraID }}-ingress-port"
       os_port_bootstrap: "{{ infraID }}-bootstrap-port"
       os_port_master: "{{ infraID }}-master-port"
       os_port_worker: "{{ infraID }}-worker-port"
@@ -28,14 +34,16 @@
       os_cp_server_group_name: "{{ infraID }}-master"
       os_compute_server_name: "{{ infraID }}-worker"
       os_compute_server_group_name: "{{ infraID }}-worker"
-      # Trunk names
-      os_cp_trunk_name: "{{ infraID }}-master-trunk"
-      os_compute_trunk_name: "{{ infraID }}-worker-trunk"
-      # Subnet pool name
-      subnet_pool: "{{ infraID }}-kuryr-pod-subnetpool"
-      # Service network name
-      os_svc_network: "{{ infraID }}-kuryr-service-network"
-      # Service subnet name
-      os_svc_subnet: "{{ infraID }}-kuryr-service-subnet"
       # Ignition files
       os_bootstrap_ignition: "{{ infraID }}-bootstrap-ignition.json"
+    when: sym.stat.exists
+
+  - name: 'Compute network resource names'
+    set_fact:
+      os_network: "{{ os_net_id }}-network"
+      os_subnet: "{{ os_net_id }}-nodes"
+      os_subnet6: "{{ os_net_id }}-nodes-v6"
+      os_router: "{{ os_net_id }}-external-router"
+      # Port names
+      os_port_api: "{{ os_net_id }}-api-port"
+      os_port_ingress: "{{ os_net_id }}-ingress-port"

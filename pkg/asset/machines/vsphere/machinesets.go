@@ -11,6 +11,7 @@ import (
 	machineapi "github.com/openshift/api/machine/v1beta1"
 	"github.com/openshift/installer/pkg/types"
 	"github.com/openshift/installer/pkg/types/vsphere"
+	"github.com/openshift/installer/pkg/utils"
 )
 
 func getMachineSetWithPlatform(
@@ -22,10 +23,35 @@ func getMachineSetWithPlatform(
 	vcenter *vsphere.VCenter,
 	replicas int32,
 	role,
-	userDataSecret string) (*machineapi.MachineSet, error) {
+	userDataSecret string,
+	hosts []*vsphere.Host) (*machineapi.MachineSet, error) {
 	provider, err := provider(clusterID, vcenter, failureDomain, mpool, osImage, userDataSecret)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to create provider")
+	}
+
+	// If static IP, create the addressesFromPools
+	if len(hosts) > 0 {
+		// Get an example host def for network specific nameserver
+		var nameservers []string
+		for _, host := range hosts {
+			if (host.IsCompute() && role == "worker") || (host.IsControlPlane() && role == "master") {
+				nameservers = host.NetworkDevice.Nameservers
+				break
+			}
+		}
+
+		// Generate AddressesFromPools for each device
+		for idx := range provider.Network.Devices {
+			provider.Network.Devices[idx].Nameservers = nameservers
+			provider.Network.Devices[idx].AddressesFromPools = []machineapi.AddressesFromPool{
+				{
+					Group:    "installer.openshift.io",
+					Name:     fmt.Sprintf("default-%d", idx),
+					Resource: "IPPool",
+				},
+			}
+		}
 	}
 
 	mset := &machineapi.MachineSet{
@@ -87,7 +113,7 @@ func getDefinedZonesFromTopology(p *vsphere.Platform) (map[string]vsphere.Failur
 }
 
 // MachineSets returns a list of machinesets for a machinepool.
-func MachineSets(clusterID string, config *types.InstallConfig, pool *types.MachinePool, osImage, role, userDataSecret string) ([]*machineapi.MachineSet, error) {
+func MachineSets(clusterID string, config *types.InstallConfig, pool *types.MachinePool, role, userDataSecret string) ([]*machineapi.MachineSet, error) {
 	if configPlatform := config.Platform.Name(); configPlatform != vsphere.Name {
 		return nil, fmt.Errorf("non vsphere configuration: %q", configPlatform)
 	}
@@ -135,7 +161,10 @@ func MachineSets(clusterID string, config *types.InstallConfig, pool *types.Mach
 			return nil, err
 		}
 
-		osImageForZone := fmt.Sprintf("%s-%s-%s", osImage, failureDomain.Region, failureDomain.Zone)
+		osImageForZone := failureDomain.Topology.Template
+		if failureDomain.Topology.Template == "" {
+			osImageForZone = utils.GenerateVSphereTemplateName(clusterID, failureDomain.Name)
+		}
 		machineset, err := getMachineSetWithPlatform(
 			clusterID,
 			name,
@@ -145,7 +174,8 @@ func MachineSets(clusterID string, config *types.InstallConfig, pool *types.Mach
 			vcenter,
 			replicas,
 			role,
-			userDataSecret)
+			userDataSecret,
+			platform.Hosts)
 		if err != nil {
 			return machinesets, err
 		}

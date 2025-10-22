@@ -1,8 +1,9 @@
 package powervs
 
 import (
+	"fmt"
+
 	"github.com/hashicorp/terraform-exec/tfexec"
-	"github.com/pkg/errors"
 
 	"github.com/openshift/installer/pkg/terraform"
 	"github.com/openshift/installer/pkg/terraform/providers"
@@ -31,8 +32,12 @@ func removeFromLoadBalancers(s stages.SplitStage, directory string, terraformDir
 		opts = append(opts, tfexec.VarFile(varFile))
 	}
 	opts = append(opts, tfexec.Var("powervs_expose_bootstrap=false"))
-	return errors.Wrap(
-		terraform.Apply(directory, powervstypes.Name, s, terraformDir, opts...),
-		"failed disabling bootstrap load balancing",
+	err := terraform.Apply(directory, powervstypes.Name, s, terraformDir, opts...)
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf(
+		"failed disabling bootstrap load balancing: %w",
+		err,
 	)
 }

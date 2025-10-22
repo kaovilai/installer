@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 
+	configv1 "github.com/openshift/api/config/v1"
 	"github.com/openshift/installer/pkg/types/powervs"
 )
 
@@ -92,10 +93,19 @@ func TestValidatePlatform(t *testing.T) {
 			valid: true,
 		},
 		{
+			name: "ServiceInstanceID: Valid Power VS ServiceInstanceID empty",
+			platform: func() *powervs.Platform {
+				p := validMinimalPlatform()
+				p.ServiceInstanceGUID = ""
+				return p
+			}(),
+			valid: true,
+		},
+		{
 			name: "ServiceInstanceID: Valid Power VS ServiceInstanceID",
 			platform: func() *powervs.Platform {
 				p := validMinimalPlatform()
-				p.ServiceInstanceID = "05d5dbfd-2a62-4d01-b37b-71211be442f6"
+				p.ServiceInstanceGUID = "05d5dbfd-2a62-4d01-b37b-71211be442f6"
 				return p
 			}(),
 			valid: true,
@@ -104,10 +114,124 @@ func TestValidatePlatform(t *testing.T) {
 			name: "ServiceInstanceID: Invalid Power VS ServiceInstanceID",
 			platform: func() *powervs.Platform {
 				p := validMinimalPlatform()
-				p.ServiceInstanceID = "abc123"
+				p.ServiceInstanceGUID = "abc123"
 				return p
 			}(),
 			valid: false,
+		},
+		{
+			name: "invalid url (no hostname) for service endpoint",
+			platform: func() *powervs.Platform {
+				p := validMinimalPlatform()
+				p.ServiceEndpoints = []configv1.PowerVSServiceEndpoint{{
+					Name: string(configv1.IBMCloudServiceCOS),
+					URL:  "/some/path",
+				}}
+				return p
+			}(),
+			valid: false,
+		},
+		{
+			name: "invalid url (has path) for service endpoint",
+			platform: func() *powervs.Platform {
+				p := validMinimalPlatform()
+				p.ServiceEndpoints = []configv1.PowerVSServiceEndpoint{{
+					Name: string(configv1.IBMCloudServiceCOS),
+					URL:  "https://test-cos.random.local/some/path",
+				}}
+				return p
+			}(),
+			valid: false,
+		},
+		{
+			name: "valid url (has version path, no trailing '/') for service endpoint",
+			platform: func() *powervs.Platform {
+				p := validMinimalPlatform()
+				p.ServiceEndpoints = []configv1.PowerVSServiceEndpoint{{
+					Name: string(configv1.IBMCloudServiceCOS),
+					URL:  "https://test-cos.random.local/v2",
+				}}
+				return p
+			}(),
+			valid: true,
+		},
+		{
+			name: "valid url (has version path and trailing '/') for service endpoint",
+			platform: func() *powervs.Platform {
+				p := validMinimalPlatform()
+				p.ServiceEndpoints = []configv1.PowerVSServiceEndpoint{{
+					Name: string(configv1.IBMCloudServiceCOS),
+					URL:  "https://test-cos.random.local/v35/",
+				}}
+				return p
+			}(),
+			valid: true,
+		},
+		{
+			name: "invalid url (has request) for service endpoint",
+			platform: func() *powervs.Platform {
+				p := validMinimalPlatform()
+				p.ServiceEndpoints = []configv1.PowerVSServiceEndpoint{{
+					Name: string(configv1.IBMCloudServiceCOS),
+					URL:  "https://test-iam.random.local?foo=some",
+				}}
+				return p
+			}(),
+			valid: false,
+		},
+		{
+			name: "valid url (no scheme) for service endpoint",
+			platform: func() *powervs.Platform {
+				p := validMinimalPlatform()
+				p.ServiceEndpoints = []configv1.PowerVSServiceEndpoint{{
+					Name: string(configv1.IBMCloudServiceCOS),
+					URL:  "test-cos.random.local",
+				}}
+				return p
+			}(),
+			valid: true,
+		},
+		{
+			name: "valid url (with scheme) for service endpoint",
+			platform: func() *powervs.Platform {
+				p := validMinimalPlatform()
+				p.ServiceEndpoints = []configv1.PowerVSServiceEndpoint{{
+					Name: string(configv1.IBMCloudServiceCOS),
+					URL:  "https://test-cos.random.local",
+				}}
+				return p
+			}(),
+			valid: true,
+		},
+		{
+			name: "duplicate service endpoints",
+			platform: func() *powervs.Platform {
+				p := validMinimalPlatform()
+				p.ServiceEndpoints = []configv1.PowerVSServiceEndpoint{{
+					Name: string(configv1.IBMCloudServiceCOS),
+					URL:  "https://test-cos.random.local",
+				}, {
+					Name: string(configv1.IBMCloudServiceCOS),
+					URL:  "test-cos.random.local",
+				}}
+				return p
+			}(),
+			valid: false,
+		},
+		{
+			name: "multiple valid service endpoints",
+			platform: func() *powervs.Platform {
+				p := validMinimalPlatform()
+				p.ServiceEndpoints = []configv1.PowerVSServiceEndpoint{{
+					Name: string(configv1.IBMCloudServiceCOS),
+					URL:  "test-cos.random.local",
+				}, {
+					Name: string(configv1.IBMCloudServiceDNSServices),
+					URL:  "test-dns.random.local",
+				}}
+				return p
+			}(),
+			valid: true,
 		},
 	}
 	for _, tc := range cases {

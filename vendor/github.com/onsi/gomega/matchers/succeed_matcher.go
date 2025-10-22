@@ -14,7 +14,7 @@ type formattedGomegaError interface {
 type SucceedMatcher struct {
 }
 
-func (matcher *SucceedMatcher) Match(actual interface{}) (success bool, err error) {
+func (matcher *SucceedMatcher) Match(actual any) (success bool, err error) {
 	// is purely nil?
 	if actual == nil {
 		return true, nil
@@ -29,14 +29,14 @@ func (matcher *SucceedMatcher) Match(actual interface{}) (success bool, err erro
 	return isNil(actual), nil
 }
 
-func (matcher *SucceedMatcher) FailureMessage(actual interface{}) (message string) {
+func (matcher *SucceedMatcher) FailureMessage(actual any) (message string) {
 	var fgErr formattedGomegaError
 	if errors.As(actual.(error), &fgErr) {
 		return fgErr.FormattedGomegaError()
 	}
-	return fmt.Sprintf("Expected success, but got an error:\n%s\n%s", format.Object(actual, 1), format.IndentString(actual.(error).Error(), 1))
+	return fmt.Sprintf("Expected success, but got an error:\n%s", format.Object(actual, 1))
 }
 
-func (matcher *SucceedMatcher) NegatedFailureMessage(actual interface{}) (message string) {
+func (matcher *SucceedMatcher) NegatedFailureMessage(actual any) (message string) {
 	return "Expected failure, but got no error."
 }

@@ -1,6 +1,7 @@
 package manifests
 
 import (
+	"context"
 	"path/filepath"
 
 	"github.com/pkg/errors"
@@ -10,6 +11,7 @@ import (
 	configv1 "github.com/openshift/api/config/v1"
 	"github.com/openshift/installer/pkg/asset"
 	"github.com/openshift/installer/pkg/asset/installconfig"
+	"github.com/openshift/installer/pkg/types/featuregates"
 )
 
 var fgFileName = filepath.Join(openshiftManifestDir, "99_feature-gate.yaml")
@@ -36,42 +38,46 @@ func (*FeatureGate) Dependencies() []asset.Asset {
 }
 
 // Generate generates the FeatureGate CRD.
-func (f *FeatureGate) Generate(dependencies asset.Parents) error {
+func (f *FeatureGate) Generate(_ context.Context, dependencies asset.Parents) error {
 	installConfig := &installconfig.InstallConfig{}
 	dependencies.Get(installConfig)
 
-	// A FeatureGate could be populated on every install,
-	// even for those using the default feature set, but for
-	// continuity let's only create a cluster feature gate
-	// when non-default feature gates are enabled.
-	if installConfig.Config.FeatureSet != configv1.Default {
-		f.Config = configv1.FeatureGate{
-			TypeMeta: metav1.TypeMeta{
-				APIVersion: configv1.SchemeGroupVersion.String(),
-				Kind:       "FeatureGate",
+	f.Config = configv1.FeatureGate{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: configv1.SchemeGroupVersion.String(),
+			Kind:       "FeatureGate",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "cluster",
+		},
+		Spec: configv1.FeatureGateSpec{
+			FeatureGateSelection: configv1.FeatureGateSelection{
+				FeatureSet: installConfig.Config.FeatureSet,
 			},
-			ObjectMeta: metav1.ObjectMeta{
-				Name: "cluster",
-			},
-			Spec: configv1.FeatureGateSpec{
-				FeatureGateSelection: configv1.FeatureGateSelection{
-					FeatureSet: installConfig.Config.FeatureSet,
-				},
-			},
-		}
-
-		configData, err := yaml.Marshal(f.Config)
-		if err != nil {
-			return errors.Wrapf(err, "failed to create %s manifests from InstallConfig", f.Name())
-		}
-
-		f.FileList = []*asset.File{
-			{
-				Filename: fgFileName,
-				Data:     configData,
-			},
-		}
+		},
 	}
+
+	if len(installConfig.Config.FeatureGates) > 0 {
+		if installConfig.Config.FeatureSet != configv1.CustomNoUpgrade {
+			return errors.Errorf("custom features can only be used with the CustomNoUpgrade feature set")
+		}
+
+		customFeatures := featuregates.GenerateCustomFeatures(installConfig.Config.FeatureGates)
+		f.Config.Spec.CustomNoUpgrade = customFeatures
+	}
+
+	configData, err := yaml.Marshal(f.Config)
+	if err != nil {
+		return errors.Wrapf(err, "failed to create %s manifests from InstallConfig", f.Name())
+	}
+
+	f.FileList = []*asset.File{
+		{
+			Filename: fgFileName,
+			Data:     configData,
+		},
+	}
+
 	return nil
 }
 

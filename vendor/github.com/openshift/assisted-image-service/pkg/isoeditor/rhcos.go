@@ -2,7 +2,6 @@ package isoeditor
 
 import (
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -17,7 +16,7 @@ const (
 
 //go:generate mockgen -package=isoeditor -destination=mock_editor.go . Editor
 type Editor interface {
-	CreateMinimalISOTemplate(fullISOPath, rootFSURL, minimalISOPath string) error
+	CreateMinimalISOTemplate(fullISOPath, rootFSURL, arch, minimalISOPath string) error
 }
 
 type rhcosEditor struct {
@@ -28,8 +27,38 @@ func NewEditor(dataDir string) Editor {
 	return &rhcosEditor{workDir: dataDir}
 }
 
+// CreateMinimalISO Creates the minimal iso by removing the rootfs and adding the url
+func CreateMinimalISO(extractDir, volumeID, rootFSURL, arch, minimalISOPath string) error {
+	if err := os.Remove(filepath.Join(extractDir, "images/pxeboot/rootfs.img")); err != nil {
+		return err
+	}
+
+	if err := embedInitrdPlaceholders(extractDir); err != nil {
+		log.WithError(err).Warnf("Failed to embed initrd placeholders")
+		return err
+	}
+
+	if err := fixGrubConfig(rootFSURL, extractDir); err != nil {
+		log.WithError(err).Warnf("Failed to edit grub config")
+		return err
+	}
+
+	// ignore isolinux.cfg for ppc64le because it doesn't exist
+	if arch != "ppc64le" {
+		if err := fixIsolinuxConfig(rootFSURL, extractDir); err != nil {
+			log.WithError(err).Warnf("Failed to edit isolinux config")
+			return err
+		}
+	}
+
+	if err := Create(minimalISOPath, extractDir, volumeID); err != nil {
+		return err
+	}
+	return nil
+}
+
 // CreateMinimalISOTemplate Creates the template minimal iso by removing the rootfs and adding the url
-func (e *rhcosEditor) CreateMinimalISOTemplate(fullISOPath, rootFSURL, minimalISOPath string) error {
+func (e *rhcosEditor) CreateMinimalISOTemplate(fullISOPath, rootFSURL, arch, minimalISOPath string) error {
 	extractDir, err := os.MkdirTemp(e.workDir, "isoutil")
 	if err != nil {
 		return err
@@ -39,26 +68,13 @@ func (e *rhcosEditor) CreateMinimalISOTemplate(fullISOPath, rootFSURL, minimalIS
 		return err
 	}
 
-	if err = os.Remove(filepath.Join(extractDir, "images/pxeboot/rootfs.img")); err != nil {
-		return err
-	}
-
-	if err = embedInitrdPlaceholders(extractDir); err != nil {
-		log.WithError(err).Warnf("Failed to embed initrd placeholders")
-		return err
-	}
-
-	if err = fixTemplateConfigs(rootFSURL, extractDir); err != nil {
-		log.WithError(err).Warnf("Failed to edit template configs")
-		return err
-	}
-
 	volumeID, err := VolumeIdentifier(fullISOPath)
 	if err != nil {
 		return err
 	}
 
-	if err = Create(minimalISOPath, extractDir, volumeID); err != nil {
+	err = CreateMinimalISO(extractDir, volumeID, rootFSURL, arch, minimalISOPath)
+	if err != nil {
 		return err
 	}
 
@@ -87,8 +103,8 @@ func embedInitrdPlaceholders(extractDir string) error {
 	return nil
 }
 
-func fixTemplateConfigs(rootFSURL, extractDir string) error {
-	availableGrubPaths := []string{"EFI/redhat/grub.cfg", "EFI/fedora/grub.cfg"}
+func fixGrubConfig(rootFSURL, extractDir string) error {
+	availableGrubPaths := []string{"EFI/redhat/grub.cfg", "EFI/fedora/grub.cfg", "boot/grub/grub.cfg", "EFI/centos/grub.cfg"}
 	var foundGrubPath string
 	for _, pathSection := range availableGrubPaths {
 		path := filepath.Join(extractDir, pathSection)
@@ -106,16 +122,9 @@ func fixTemplateConfigs(rootFSURL, extractDir string) error {
 	if err := editFile(foundGrubPath, `(?m)^(\s+linux) (.+| )+$`, replacement); err != nil {
 		return err
 	}
-	replacement = fmt.Sprintf("$1 $2 coreos.live.rootfs_url=%s", rootFSURL)
-	if err := editFile(filepath.Join(extractDir, "isolinux/isolinux.cfg"), `(?m)^(\s+append) (.+| )+$`, replacement); err != nil {
-		return err
-	}
 
 	// Remove the coreos.liveiso parameter
 	if err := editFile(foundGrubPath, ` coreos.liveiso=\S+`, ""); err != nil {
-		return err
-	}
-	if err := editFile(filepath.Join(extractDir, "isolinux/isolinux.cfg"), ` coreos.liveiso=\S+`, ""); err != nil {
 		return err
 	}
 
@@ -123,6 +132,20 @@ func fixTemplateConfigs(rootFSURL, extractDir string) error {
 	if err := editFile(foundGrubPath, `(?m)^(\s+initrd) (.+| )+$`, fmt.Sprintf("$1 $2 %s", ramDiskImagePath)); err != nil {
 		return err
 	}
+
+	return nil
+}
+
+func fixIsolinuxConfig(rootFSURL, extractDir string) error {
+	replacement := fmt.Sprintf("$1 $2 coreos.live.rootfs_url=%s", rootFSURL)
+	if err := editFile(filepath.Join(extractDir, "isolinux/isolinux.cfg"), `(?m)^(\s+append) (.+| )+$`, replacement); err != nil {
+		return err
+	}
+
+	if err := editFile(filepath.Join(extractDir, "isolinux/isolinux.cfg"), ` coreos.liveiso=\S+`, ""); err != nil {
+		return err
+	}
+
 	if err := editFile(filepath.Join(extractDir, "isolinux/isolinux.cfg"), `(?m)^(\s+append.*initrd=\S+) (.*)$`, fmt.Sprintf("${1},%s ${2}", ramDiskImagePath)); err != nil {
 		return err
 	}
@@ -131,7 +154,7 @@ func fixTemplateConfigs(rootFSURL, extractDir string) error {
 }
 
 func editFile(fileName string, reString string, replacement string) error {
-	content, err := ioutil.ReadFile(fileName)
+	content, err := os.ReadFile(fileName)
 	if err != nil {
 		return err
 	}
@@ -139,7 +162,7 @@ func editFile(fileName string, reString string, replacement string) error {
 	re := regexp.MustCompile(reString)
 	newContent := re.ReplaceAllString(string(content), replacement)
 
-	if err := ioutil.WriteFile(fileName, []byte(newContent), 0600); err != nil {
+	if err := os.WriteFile(fileName, []byte(newContent), 0600); err != nil {
 		return err
 	}
 

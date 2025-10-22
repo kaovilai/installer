@@ -8,8 +8,10 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/gophercloud/utils/openstack/clientconfig"
+	"github.com/gophercloud/utils/v2/openstack/clientconfig"
 	"github.com/pkg/errors"
+	"github.com/sirupsen/logrus"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"sigs.k8s.io/yaml"
 
 	"github.com/openshift/installer/pkg/asset"
@@ -74,7 +76,9 @@ func (o *Openshift) Dependencies() []asset.Asset {
 }
 
 // Generate generates the respective operator config.yml files
-func (o *Openshift) Generate(dependencies asset.Parents) error {
+//
+//nolint:gocyclo
+func (o *Openshift) Generate(ctx context.Context, dependencies asset.Parents) error {
 	installConfig := &installconfig.InstallConfig{}
 	clusterID := &installconfig.ClusterID{}
 	kubeadminPassword := &password.KubeadminPassword{}
@@ -85,7 +89,7 @@ func (o *Openshift) Generate(dependencies asset.Parents) error {
 	platform := installConfig.Config.Platform.Name()
 	switch platform {
 	case awstypes.Name:
-		ssn, err := installConfig.AWS.Session(context.TODO())
+		ssn, err := installConfig.AWS.Session(ctx)
 		if err != nil {
 			return err
 		}
@@ -126,7 +130,7 @@ func (o *Openshift) Generate(dependencies asset.Parents) error {
 			},
 		}
 	case gcptypes.Name:
-		session, err := gcp.GetSession(context.TODO())
+		session, err := gcp.GetSession(ctx)
 		if err != nil {
 			return err
 		}
@@ -137,7 +141,7 @@ func (o *Openshift) Generate(dependencies asset.Parents) error {
 			},
 		}
 	case ibmcloudtypes.Name:
-		client, err := ibmcloud.NewClient()
+		client, err := ibmcloud.NewClient(installConfig.Config.Platform.IBMCloud.ServiceEndpoints)
 		if err != nil {
 			return err
 		}
@@ -154,9 +158,25 @@ func (o *Openshift) Generate(dependencies asset.Parents) error {
 			return err
 		}
 
-		// We need to replace the local cacert path with one that is used in OpenShift
+		var caCert []byte
 		if cloud.CACertFile != "" {
+			var err error
+			caCert, err = os.ReadFile(cloud.CACertFile)
+			if err != nil {
+				return err
+			}
+			// We need to replace the local cacert path with one that is used in OpenShift
 			cloud.CACertFile = "/etc/kubernetes/static-pod-resources/configmaps/cloud-config/ca-bundle.pem"
+		}
+
+		// Application credentials are easily rotated in the event of a leak and should be preferred. Encourage their use.
+		authTypes := sets.New(clientconfig.AuthPassword, clientconfig.AuthV2Password, clientconfig.AuthV3Password)
+		if cloud.AuthInfo != nil && authTypes.Has(cloud.AuthType) {
+			logrus.Warnf(
+				"clouds.yaml file is using %q type auth. Consider using the %q auth type instead to rotate credentials more easily.",
+				cloud.AuthType,
+				clientconfig.AuthV3ApplicationCredential,
+			)
 		}
 
 		clouds := make(map[string]map[string]*clientconfig.Cloud)
@@ -175,11 +195,13 @@ func (o *Openshift) Generate(dependencies asset.Parents) error {
 		}
 
 		credsEncoded := base64.StdEncoding.EncodeToString(marshalled)
-		credsINIEncoded := base64.StdEncoding.EncodeToString(cloudProviderConf)
+		cloudProviderConfEncoded := base64.StdEncoding.EncodeToString(cloudProviderConf)
+		caCertEncoded := base64.StdEncoding.EncodeToString(caCert)
 		cloudCreds = cloudCredsSecretData{
 			OpenStack: &OpenStackCredsSecretData{
-				Base64encodeCloudCreds:    credsEncoded,
-				Base64encodeCloudCredsINI: credsINIEncoded,
+				Base64encodeCloudsYAML: credsEncoded,
+				Base64encodeCloudsConf: cloudProviderConfEncoded,
+				Base64encodeCACert:     caCertEncoded,
 			},
 		}
 	case vspheretypes.Name:
@@ -253,40 +275,9 @@ func (o *Openshift) Generate(dependencies asset.Parents) error {
 	case baremetaltypes.Name:
 		bmTemplateData := baremetalTemplateData{
 			Baremetal:                 installConfig.Config.Platform.BareMetal,
-			ProvisioningOSDownloadURL: string(*rhcosImage),
+			ProvisioningOSDownloadURL: rhcosImage.ControlPlane,
 		}
 		assetData["99_baremetal-provisioning-config.yaml"] = applyTemplateData(baremetalConfig.Files()[0].Data, bmTemplateData)
-	}
-
-	if platform == azuretypes.Name && installConfig.Config.Azure.IsARO() {
-		// config is used to created compatible secret to trigger azure cloud
-		// controller config merge behaviour
-		// https://github.com/openshift/origin/blob/90c050f5afb4c52ace82b15e126efe98fa798d88/vendor/k8s.io/legacy-cloud-providers/azure/azure_config.go#L83
-		session, err := installConfig.Azure.Session()
-		if err != nil {
-			return err
-		}
-		config := struct {
-			AADClientID     string `json:"aadClientId" yaml:"aadClientId"`
-			AADClientSecret string `json:"aadClientSecret" yaml:"aadClientSecret"`
-		}{
-			AADClientID:     session.Credentials.ClientID,
-			AADClientSecret: session.Credentials.ClientSecret,
-		}
-
-		b, err := yaml.Marshal(config)
-		if err != nil {
-			return err
-		}
-
-		azureCloudProviderSecret := &openshift.AzureCloudProviderSecret{}
-		dependencies.Get(azureCloudProviderSecret)
-		for _, f := range azureCloudProviderSecret.Files() {
-			name := strings.TrimSuffix(filepath.Base(f.Filename), ".template")
-			assetData[name] = applyTemplateData(f.Data, map[string]string{
-				"CloudConfig": string(b),
-			})
-		}
 	}
 
 	o.FileList = []*asset.File{}

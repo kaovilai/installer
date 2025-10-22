@@ -1,6 +1,7 @@
 package vsphere
 
 import (
+	"net/netip"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -13,6 +14,8 @@ import (
 	"github.com/openshift/installer/pkg/types/conversion"
 	"github.com/openshift/installer/pkg/types/vsphere"
 )
+
+const testClusterID = "test"
 
 var installConfigSample = `
 apiVersion: v1
@@ -107,6 +110,62 @@ platform:
         networks:
         - network1
         datastore: /dc4/datastore/datastore4
+    hosts:
+    - role: bootstrap
+      networkDevice:
+        ipaddrs:
+        - 192.168.101.240/24
+        gateway: 192.168.101.1        
+        nameservers:
+        - 192.168.101.2
+    - role: control-plane
+      failureDomain: deployzone-us-east-1a
+      networkDevice:
+        ipAddrs:
+        - 192.168.101.241/24
+        gateway: 192.168.101.1        
+        nameservers:
+        - 192.168.101.2
+    - role: control-plane
+      failureDomain: deployzone-us-east-2a
+      networkDevice:
+        ipAddrs:
+        - 192.168.101.242/24
+        gateway: 192.168.101.1
+        nameservers:
+        - 192.168.101.2
+    - role: control-plane
+      failureDomain: deployzone-us-east-3a
+      networkDevice:
+        ipAddrs:
+        - 192.168.101.243/24
+        gateway: 192.168.101.1        
+        nameservers:
+        - 192.168.101.2
+    - role: compute
+      failureDomain: deployzone-us-east-1a
+      networkDevice:
+        ipAddrs:
+        - 192.168.101.244/24
+        gateway: 192.168.101.1        
+        nameservers:
+        - 192.168.101.2
+    - role: compute
+      failureDomain: deployzone-us-east-2a
+      networkDevice:
+        ipAddrs:
+        - 192.168.101.245/24
+        gateway: 192.168.101.1        
+        nameservers:
+        - 192.168.101.2
+    - role: compute
+      failureDomain: deployzone-us-east-3a
+      networkDevice:
+        ipAddrs:
+        - 192.168.101.246/24
+        gateway: 192.168.101.1        
+        nameservers:
+        - 192.168.101.2
 pullSecret:
 sshKey:`
 
@@ -149,6 +208,26 @@ var machinePoolReducedZones = types.MachinePool{
 			Zones: []string{
 				"deployzone-us-east-1a",
 				"deployzone-us-east-2a",
+			},
+		},
+	},
+	Hyperthreading: "true",
+	Architecture:   types.ArchitectureAMD64,
+}
+
+var machinePoolSingleZones = types.MachinePool{
+	Name:     "master",
+	Replicas: &machinePoolReplicas,
+	Platform: types.MachinePoolPlatform{
+		VSphere: &vsphere.MachinePool{
+			NumCPUs:           4,
+			NumCoresPerSocket: 2,
+			MemoryMiB:         16384,
+			OSDisk: vsphere.OSDisk{
+				DiskSizeGB: 60,
+			},
+			Zones: []string{
+				"deployzone-us-east-1a",
 			},
 		},
 	},
@@ -205,7 +284,7 @@ func assertOnUnexpectedErrorState(t *testing.T, expectedError string, err error)
 }
 
 func TestConfigMasters(t *testing.T) {
-	clusterID := "test"
+	clusterID := testClusterID
 	installConfig, err := parseInstallConfig()
 	if err != nil {
 		assert.Errorf(t, err, "unable to parse sample install config")
@@ -286,6 +365,21 @@ func TestConfigMasters(t *testing.T) {
 			},
 		},
 		{
+			testCase:                   "all masters in single zone / pool",
+			machinePool:                &machinePoolSingleZones,
+			maxAllowedWorkspaceMatches: 3,
+			installConfig:              installConfig,
+			workspaces: []machineapi.Workspace{
+				{
+					Server:       "your.vcenter.example.com",
+					Datacenter:   "dc1",
+					Folder:       "/dc1/vm/folder1",
+					Datastore:    "/dc1/datastore/datastore1",
+					ResourcePool: "/dc1/host/c1/Resources/rp1",
+				},
+			},
+		},
+		{
 			testCase:                   "full path to cluster resource pool when no pool provided via placement constraint",
 			machinePool:                &machinePoolValidZones,
 			maxAllowedWorkspaceMatches: 1,
@@ -319,7 +413,7 @@ func TestConfigMasters(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.testCase, func(t *testing.T) {
-			machines, err := Machines(clusterID, tc.installConfig, tc.machinePool, "", "", "")
+			data, err := Machines(clusterID, tc.installConfig, tc.machinePool, "", "")
 			assertOnUnexpectedErrorState(t, tc.expectedError, err)
 
 			if len(tc.workspaces) > 0 {
@@ -328,7 +422,7 @@ func TestConfigMasters(t *testing.T) {
 					matchCountByIndex = append(matchCountByIndex, 0)
 				}
 
-				for _, machine := range machines {
+				for _, machine := range data.Machines {
 					// check if expected workspaces are returned
 					machineWorkspace := machine.Spec.ProviderSpec.Value.Object.(*machineapi.VSphereMachineProviderSpec).Workspace
 					for idx, workspace := range tc.workspaces {
@@ -344,6 +438,112 @@ func TestConfigMasters(t *testing.T) {
 					if count < tc.minAllowedWorkspaceMatches {
 						t.Errorf("machine workspace was enountered too few times[min: %d]", tc.minAllowedWorkspaceMatches)
 					}
+				}
+
+				if data.ControlPlaneMachineSet != nil {
+					// Make sure FDs equal same quantity as config
+					fds := data.ControlPlaneMachineSet.Spec.Template.OpenShiftMachineV1Beta1Machine.FailureDomains
+					if len(fds.VSphere) != len(tc.workspaces) {
+						t.Errorf("machine workspace count %d does not equal number of failure domains [count: %d] in CPMS", len(tc.workspaces), len(fds.VSphere))
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestHostsToMachines(t *testing.T) {
+	clusterID := testClusterID
+	installConfig, err := parseInstallConfig()
+	if err != nil {
+		assert.Errorf(t, err, "unable to parse sample install config")
+		return
+	}
+	defaultClusterResourcePool, err := parseInstallConfig()
+	if err != nil {
+		t.Error(err)
+		return
+	}
+	defaultClusterResourcePool.VSphere.FailureDomains[0].Topology.ResourcePool = ""
+
+	testCases := []struct {
+		testCase      string
+		expectedError string
+		machinePool   *types.MachinePool
+		installConfig *types.InstallConfig
+		role          string
+		machineCount  int
+	}{
+		{
+			testCase:      "Static IP - ControlPlane",
+			machinePool:   &machinePoolValidZones,
+			installConfig: installConfig,
+			role:          "master",
+			machineCount:  3,
+		},
+		{
+			testCase:      "Static IP - Compute",
+			machinePool:   &machinePoolValidZones,
+			installConfig: installConfig,
+			role:          "worker",
+			machineCount:  3,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.testCase, func(t *testing.T) {
+			data, err := Machines(clusterID, tc.installConfig, tc.machinePool, tc.role, "")
+			assertOnUnexpectedErrorState(t, tc.expectedError, err)
+
+			// Check machine counts
+			if len(data.Machines) != tc.machineCount {
+				t.Errorf("machine count (%v) did not match expected (%v).", len(data.Machines), tc.machineCount)
+			}
+
+			// Check Claim counts
+			if len(data.IPClaims) != tc.machineCount {
+				t.Errorf("ip address claim count (%v) did not match expected (%v).", len(data.IPClaims), tc.machineCount)
+			}
+
+			// Check ip address counts
+			if len(data.IPAddresses) != tc.machineCount {
+				t.Errorf("ip address count (%v) did not match expected (%v).", len(data.IPAddresses), tc.machineCount)
+			}
+
+			// Verify static IP was set on all machines
+			for index, machine := range data.Machines {
+				provider, success := machine.Spec.ProviderSpec.Value.Object.(*machineapi.VSphereMachineProviderSpec)
+				if !success {
+					t.Errorf("Unable to convert vshere machine provider spec.")
+				}
+
+				if len(provider.Network.Devices) == 1 {
+					// Check IP
+					if provider.Network.Devices[0].AddressesFromPools == nil {
+						t.Errorf("AddressesFromPools is not set: %v", machine)
+					}
+
+					// Check nameserver
+					if provider.Network.Devices[0].Nameservers == nil || provider.Network.Devices[0].Nameservers[0] == "" {
+						t.Errorf("Nameserver is not set: %v", machine)
+					}
+
+					gateway := data.IPAddresses[index].Spec.Gateway
+					ip, err := netip.ParseAddr(gateway)
+					if err != nil {
+						t.Error(err)
+					}
+					targetGateway := "192.168.101.1"
+					if ip.Is6() {
+						targetGateway = "2001:0db8:85a3:0000:0000:8a2e:0370:7334"
+					}
+
+					// Check gateway
+					if gateway != targetGateway {
+						t.Errorf("Gateway is incorrect: %v", gateway)
+					}
+				} else {
+					t.Errorf("Devices not set for machine: %v", machine)
 				}
 			}
 		})
